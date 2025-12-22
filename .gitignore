@@ -1,0 +1,59 @@
+# --- dependencies ---
+node_modules/
+
+# --- env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- logs ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- build / output ---
+dist/
+build/
+out/
+.cache/
+.tmp/
+tmp/
+
+# --- coverage ---
+coverage/
+.nyc_output/
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+
+# --- editor / IDE ---
+.idea/
+*.swp
+*.swo
+
+# VS Code (keep workspace configs if you want)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# --- package manager caches ---
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# --- misc ---
+*.pid
+*.pid.lock
+*.tgz
+
+# --- ngrok (optional, if you use it) ---
+.ngrok2/
+ngrok.yml
