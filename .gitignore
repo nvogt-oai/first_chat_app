@@ -1,59 +1,40 @@
-# --- dependencies ---
-node_modules/
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
 
-# --- env / secrets ---
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / builds
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Coverage / test reports
+.coverage
+coverage.xml
+htmlcov/
+
+# Local environment / secrets
 .env
 .env.*
 !.env.example
 
-# --- logs ---
+# Logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
 
-# --- build / output ---
-dist/
-build/
-out/
-.cache/
-.tmp/
-tmp/
-
-# --- coverage ---
-coverage/
-.nyc_output/
-
-# --- OS junk ---
+# OS / editor junk
 .DS_Store
 Thumbs.db
-
-# --- editor / IDE ---
 .idea/
-*.swp
-*.swo
+.vscode/
 
-# VS Code (keep workspace configs if you want)
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
-
-# --- package manager caches ---
-.npm/
-.pnpm-store/
-.yarn/cache/
-.yarn/unplugged/
-.yarn/build-state.yml
-.yarn/install-state.gz
-
-# --- misc ---
-*.pid
-*.pid.lock
-*.tgz
-
-# --- ngrok (optional, if you use it) ---
-.ngrok2/
-ngrok.yml
