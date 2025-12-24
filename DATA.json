@@ -1,0 +1,23 @@
+{
+  "users": {
+    "anonymous": {
+      "daily_goal_calories": 2000,
+      "entries": [],
+      "next_id": 1
+    },
+    "nvogt": {
+      "daily_goal_calories": 2200,
+      "entries": [
+        {
+          "calories": 680,
+          "createdAt": "2025-12-24T14:40:21.997254",
+          "date": "2025-12-24",
+          "food": "Choripan sandwich (chorizo) on baguette roll with lettuce, tomato, and mayonnaise",
+          "id": "entry-1",
+          "notes": "Estimated calories: chorizo + baguette roll + mayo; lettuce/tomato minimal."
+        }
+      ],
+      "next_id": 2
+    }
+  }
+}

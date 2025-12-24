@@ -1,11 +1,14 @@
 # mcp_endpoints.py
 from __future__ import annotations
 
+import json
+import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 import jwt
 from pydantic import AnyHttpUrl
@@ -13,11 +16,13 @@ from pydantic import AnyHttpUrl
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 from auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
 
 REQUIRED_SCOPES = ["toy.read"]
+DEBUG_LOG_TOKENS = os.getenv("DEBUG_LOG_TOKENS", "0").lower() in ("1", "true", "yes", "on")
 
 ISSUER_URL = AnyHttpUrl(ISSUER)
 RESOURCE_SERVER_URL = AnyHttpUrl("http://localhost:8000/mcp")
@@ -61,7 +66,156 @@ class _State:
     daily_goal_calories: int | None
 
 
-STATE = _State(entries=[], next_id=1, daily_goal_calories=None)
+STATE_BY_USER: dict[str, _State] = {}
+STATE_LOCK = threading.Lock()
+
+# Persist toy data to a JSON file in the project directory.
+DATA_FILE = os.path.join(os.path.dirname(__file__), "DATA.json")
+
+
+def _empty_state() -> _State:
+    return _State(entries=[], next_id=1, daily_goal_calories=None)
+
+
+def _get_user_id(ctx: Context | None) -> str:
+    """
+    Return the authenticated user identifier for this request.
+
+    For Streamable HTTP, the MCP bearer auth backend attaches an AuthenticatedUser
+    to the underlying Starlette request (request.user.access_token.client_id).
+    FastMCP's Context.client_id reads from request meta and may be unset, so we
+    prefer the Starlette auth user when available.
+    """
+    if ctx is None:
+        return "anonymous"
+
+    # Prefer Starlette AuthenticationMiddleware user if present
+    try:
+        req = ctx.request_context.request
+        user = getattr(req, "user", None) if req is not None else None
+        access_token = getattr(user, "access_token", None) if user is not None else None
+        principal = getattr(access_token, "client_id", None) if access_token is not None else None
+        if isinstance(principal, str) and principal.strip():
+            return principal.strip()
+    except Exception:
+        pass
+
+    # Fallback: FastMCP-provided client_id (may be None depending on transport)
+    cid = getattr(ctx, "client_id", None)
+    if isinstance(cid, str) and cid.strip():
+        return cid.strip()
+
+    return "anonymous"
+
+
+def _load_state_from_disk() -> None:
+    """
+    Load STATE_BY_USER from DATA.json if it exists and is valid JSON.
+
+    Current schema:
+      {
+        "users": {
+          "<username>": { "entries": [...], "next_id": 1, "daily_goal_calories": 2000 | null }
+        }
+      }
+
+    Legacy schema (pre per-user):
+      { "entries": [...], "next_id": 1, "daily_goal_calories": 2000 | null }
+    will be migrated to:
+      { "users": { "default": <legacy_state> } }
+    """
+    with STATE_LOCK:
+        try:
+            if not os.path.exists(DATA_FILE):
+                return
+            raw = open(DATA_FILE, "r", encoding="utf-8").read()
+            if not raw.strip():
+                return
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+
+            users_obj = data.get("users")
+            if isinstance(users_obj, dict):
+                STATE_BY_USER.clear()
+                for user_id, st in users_obj.items():
+                    if not isinstance(user_id, str) or not user_id.strip():
+                        continue
+                    if not isinstance(st, dict):
+                        continue
+                    entries = st.get("entries")
+                    next_id = st.get("next_id")
+                    daily_goal = st.get("daily_goal_calories")
+                    state = _empty_state()
+                    if isinstance(entries, list):
+                        cleaned_entries: list[CalorieEntry] = []
+                        for e in entries:
+                            if isinstance(e, dict):
+                                cleaned_entries.append(cast(CalorieEntry, e))
+                        state.entries = cleaned_entries
+                    if isinstance(next_id, int) and next_id >= 1:
+                        state.next_id = next_id
+                    if daily_goal is None or (isinstance(daily_goal, int) and daily_goal >= 1):
+                        state.daily_goal_calories = daily_goal
+                    STATE_BY_USER[user_id.strip()] = state
+                return
+
+            # Legacy migration
+            entries = data.get("entries")
+            next_id = data.get("next_id")
+            daily_goal = data.get("daily_goal_calories")
+            legacy = _empty_state()
+            if isinstance(entries, list):
+                cleaned_entries_legacy: list[CalorieEntry] = []
+                for e in entries:
+                    if isinstance(e, dict):
+                        cleaned_entries_legacy.append(cast(CalorieEntry, e))
+                legacy.entries = cleaned_entries_legacy
+            if isinstance(next_id, int) and next_id >= 1:
+                legacy.next_id = next_id
+            if daily_goal is None or (isinstance(daily_goal, int) and daily_goal >= 1):
+                legacy.daily_goal_calories = daily_goal
+            STATE_BY_USER.clear()
+            STATE_BY_USER["default"] = legacy
+        except Exception as e:
+            print("DATA LOAD: failed to load DATA.json:", repr(e))
+
+
+def _persist_state_to_disk() -> None:
+    """
+    Atomically write STATE_BY_USER to DATA.json (toy persistence).
+    """
+    with STATE_LOCK:
+        users_payload: dict[str, Any] = {}
+        for user_id, st in STATE_BY_USER.items():
+            users_payload[user_id] = {
+                "entries": st.entries,
+                "next_id": st.next_id,
+                "daily_goal_calories": st.daily_goal_calories,
+            }
+        payload = {"users": users_payload}
+        tmp_path = DATA_FILE + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp_path, DATA_FILE)
+        except Exception as e:
+            print("DATA SAVE: failed to write DATA.json:", repr(e))
+
+
+# Initialize state on import
+_load_state_from_disk()
+
+
+def _get_state_for_user(user_id: str) -> _State:
+    with STATE_LOCK:
+        st = STATE_BY_USER.get(user_id)
+        if st is None:
+            st = _empty_state()
+            STATE_BY_USER[user_id] = st
+        return st
 
 
 def _format_local_date_yyyy_mm_dd(dt: datetime) -> str:
@@ -106,16 +260,17 @@ def _parse_goal_int_pos(value: Any) -> int | None:
     return n
 
 
-def _summarize_for_date(yyyy_mm_dd: str) -> DailySummary:
-    day_entries = [e for e in STATE.entries if e.get("date") == yyyy_mm_dd]
+def _summarize_for_date(state: _State, yyyy_mm_dd: str) -> DailySummary:
+    day_entries = [e for e in state.entries if e.get("date") == yyyy_mm_dd]
     total = sum(int(e.get("calories") or 0) for e in day_entries)
     summary: DailySummary = {
         "date": yyyy_mm_dd,
         "totalCalories": int(total),
         "entriesCount": len(day_entries),
     }
-    if isinstance(STATE.daily_goal_calories, int):
-        goal = STATE.daily_goal_calories
+    daily_goal = state.daily_goal_calories
+    if isinstance(daily_goal, int):
+        goal = daily_goal
         summary["goalCalories"] = goal
         summary["remainingCalories"] = max(0, goal - int(total))
     return summary
@@ -127,7 +282,7 @@ def _reply(
     entries: list[CalorieEntry] | None = None,
     summary: DailySummary | None = None,
 ) -> CalorieToolResponse:
-    payload_entries = entries if entries is not None else STATE.entries
+    payload_entries = entries if entries is not None else []
     structured: dict[str, Any] = {"entries": payload_entries}
     if summary is not None:
         structured["summary"] = summary
@@ -153,10 +308,16 @@ class JwtTokenVerifier(TokenVerifier):
         iss = payload.get("iss")
         sub = payload.get("sub")
         scopes = payload.get("scp")
+        client_id_claim = payload.get("client_id")
 
-        print("MCP VERIFY: iss=", iss, " expected=", ISSUER)
-        print("MCP VERIFY: sub=", sub)
-        print("MCP VERIFY: scopes=", scopes)
+        if DEBUG_LOG_TOKENS:
+            # WARNING: Logging bearer tokens is sensitive. Use only for local debugging.
+            print("MCP VERIFY: raw token (masked):", (token[:16] + "...") if isinstance(token, str) else token)
+            print("MCP VERIFY: claims: iss=", iss, " sub(username)=", sub, " client_id=", client_id_claim, " scp=", scopes)
+        else:
+            print("MCP VERIFY: iss=", iss, " expected=", ISSUER)
+            print("MCP VERIFY: sub=", sub)
+            print("MCP VERIFY: scopes=", scopes)
 
         if iss != ISSUER:
             print("MCP VERIFY: issuer mismatch")
@@ -210,6 +371,7 @@ def log_food(
     date: str | None = None,
     meal: Meal | None = None,
     notes: str | None = None,
+    ctx: Context | None = None,
 ) -> CalorieToolResponse:
     """
     Logs a food entry with calories (optionally for a specific date/meal).
@@ -223,6 +385,8 @@ def log_food(
     parsed_date = _parse_date_yyyy_mm_dd(date)
     now = datetime.now()
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(now)
+    user_id = _get_user_id(ctx)
+    state = _get_state_for_user(user_id)
 
     if meal is not None and meal not in ("breakfast", "lunch", "dinner", "snack"):
         return _reply("Invalid input: `meal` must be one of breakfast/lunch/dinner/snack.")
@@ -232,8 +396,9 @@ def log_food(
         if len(notes) > 500:
             return _reply("Invalid input: `notes` must be <= 500 characters.")
 
-    entry_id = f"entry-{STATE.next_id}"
-    STATE.next_id += 1
+    with STATE_LOCK:
+        entry_id = f"entry-{state.next_id}"
+        state.next_id += 1
     entry: CalorieEntry = {
         "id": entry_id,
         "food": food.strip(),
@@ -246,62 +411,83 @@ def log_food(
     if notes is not None:
         entry["notes"] = notes
 
-    STATE.entries = [*STATE.entries, entry]
-    summary = _summarize_for_date(yyyy_mm_dd)
-    return _reply(f'Logged {entry["calories"]} calories for "{entry["food"]}" on {yyyy_mm_dd}.', summary=summary)
+    with STATE_LOCK:
+        state.entries = [*state.entries, entry]
+    _persist_state_to_disk()
+    summary = _summarize_for_date(state, yyyy_mm_dd)
+    return _reply(
+        f'Logged {entry["calories"]} calories for "{entry["food"]}" on {yyyy_mm_dd}.',
+        entries=list(state.entries),
+        summary=summary,
+    )
 
 
 @mcp.tool()
-def delete_entry(id: str) -> CalorieToolResponse:
+def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Deletes a logged food entry by id.
     """
     if not isinstance(id, str) or not id.strip():
         return _reply("Missing entry id.")
-    entry = next((e for e in STATE.entries if e.get("id") == id), None)
+    user_id = _get_user_id(ctx)
+    state = _get_state_for_user(user_id)
+    with STATE_LOCK:
+        entry = next((e for e in state.entries if e.get("id") == id), None)
     if entry is None:
-        return _reply(f"Entry {id} was not found.")
-    STATE.entries = [e for e in STATE.entries if e.get("id") != id]
+        return _reply(f"Entry {id} was not found.", entries=list(state.entries))
+    with STATE_LOCK:
+        state.entries = [e for e in state.entries if e.get("id") != id]
+    _persist_state_to_disk()
     entry_date = str(entry.get("date") or _format_local_date_yyyy_mm_dd(datetime.now()))
-    summary = _summarize_for_date(entry_date)
+    summary = _summarize_for_date(state, entry_date)
     food = entry.get("food") or "unknown"
-    return _reply(f'Deleted entry "{food}" ({id}).', summary=summary)
+    return _reply(f'Deleted entry "{food}" ({id}).', entries=list(state.entries), summary=summary)
 
 
 @mcp.tool()
-def list_entries(date: str | None = None) -> CalorieToolResponse:
+def list_entries(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Lists logged food entries (optionally filtered by date).
     """
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.")
+        user_id = _get_user_id(ctx)
+        state = _get_state_for_user(user_id)
+        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
+    user_id = _get_user_id(ctx)
+    state = _get_state_for_user(user_id)
     if not parsed_date:
-        return _reply("All entries:")
-    filtered = [e for e in STATE.entries if e.get("date") == parsed_date]
+        return _reply("All entries:", entries=list(state.entries))
+    with STATE_LOCK:
+        filtered = [e for e in state.entries if e.get("date") == parsed_date]
     return _reply(
         f"Entries for {parsed_date}:",
         entries=filtered,
-        summary=_summarize_for_date(parsed_date),
+        summary=_summarize_for_date(state, parsed_date),
     )
 
 
 @mcp.tool()
-def get_daily_summary(date: str | None = None) -> CalorieToolResponse:
+def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Returns total calories and entry count for a date (defaults to today).
     """
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.")
+        user_id = _get_user_id(ctx)
+        state = _get_state_for_user(user_id)
+        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(datetime.now())
-    summary = _summarize_for_date(yyyy_mm_dd)
+    user_id = _get_user_id(ctx)
+    state = _get_state_for_user(user_id)
+    summary = _summarize_for_date(state, yyyy_mm_dd)
     goal_text = (
         f' Goal {summary.get("goalCalories")}, remaining {summary.get("remainingCalories")}.'
         if "goalCalories" in summary
         else ""
     )
-    day_entries = [e for e in STATE.entries if e.get("date") == yyyy_mm_dd]
+    with STATE_LOCK:
+        day_entries = [e for e in state.entries if e.get("date") == yyyy_mm_dd]
     return _reply(
         f'Total for {yyyy_mm_dd}: {summary["totalCalories"]} calories across {summary["entriesCount"]} entries.{goal_text}',
         entries=day_entries,
@@ -310,13 +496,23 @@ def get_daily_summary(date: str | None = None) -> CalorieToolResponse:
 
 
 @mcp.tool()
-def set_daily_goal(calories: int | str) -> CalorieToolResponse:
+def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Sets a daily calorie goal (used by daily summaries).
     """
     goal = _parse_goal_int_pos(calories)
     if goal is None:
-        return _reply("Invalid goal calories.")
-    STATE.daily_goal_calories = int(goal)
+        user_id = _get_user_id(ctx)
+        state = _get_state_for_user(user_id)
+        return _reply("Invalid goal calories.", entries=list(state.entries))
+    user_id = _get_user_id(ctx)
+    state = _get_state_for_user(user_id)
+    with STATE_LOCK:
+        state.daily_goal_calories = int(goal)
+    _persist_state_to_disk()
     today = _format_local_date_yyyy_mm_dd(datetime.now())
-    return _reply(f"Set daily goal to {goal} calories.", summary=_summarize_for_date(today))
+    return _reply(
+        f"Set daily goal to {goal} calories.",
+        entries=list(state.entries),
+        summary=_summarize_for_date(state, today),
+    )

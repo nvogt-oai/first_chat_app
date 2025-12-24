@@ -1,0 +1,19 @@
+{
+  "auth_codes": {},
+  "registered_clients": {
+    "client_ce5482aaaae34b4b85d4d55f1ca4ef79": {
+      "client_secret": null,
+      "created_at": 1766614238,
+      "redirect_uris": [
+        "https://chatgpt.com/connector_platform_oauth_redirect"
+      ],
+      "token_endpoint_auth_method": "none"
+    }
+  },
+  "sessions": {
+    "sess_a6a21276ba904934b099a95f08594bb4": {
+      "created_at": 1766614263,
+      "username": "nvogt"
+    }
+  }
+}

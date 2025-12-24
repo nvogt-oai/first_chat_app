@@ -4,7 +4,9 @@ from urllib.parse import urlparse, parse_qs
 
 import base64
 import hashlib
+import json
 import os
+import threading
 import time
 import uuid
 from typing import Any, Optional
@@ -21,6 +23,7 @@ router = APIRouter(tags=["auth"])
 # -------------------------------------------------------------------
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-super-secret")
 JWT_ALG = "HS256"
+DEBUG_LOG_TOKENS = os.getenv("DEBUG_LOG_TOKENS", "0").lower() in ("1", "true", "yes", "on")
 
 # Set this when using ngrok:
 #   export PUBLIC_BASE_URL="https://harsh-jordy-horribly.ngrok-free.dev"
@@ -37,6 +40,85 @@ SCOPES_SUPPORTED = ["toy.read"]
 # -------------------------------------------------------------------
 SESSION_COOKIE_NAME = "toy_session"
 SESSIONS: dict[str, dict[str, Any]] = {}  # session_id -> { "username": str, "created_at": int }
+
+AUTH_STATE_LOCK = threading.Lock()
+# Persist toy auth state to a separate JSON file in the project directory.
+AUTH_STATE_FILE = os.path.join(os.path.dirname(__file__), "AUTH_STATE.json")
+
+
+def _persist_auth_state_to_disk() -> None:
+    """
+    Atomically write auth state to AUTH_STATE.json (toy persistence).
+
+    Schema:
+      {
+        "registered_clients": { ... },
+        "auth_codes": { ... },
+        "sessions": { ... }
+      }
+    """
+    with AUTH_STATE_LOCK:
+        payload = {
+            "registered_clients": REGISTERED_CLIENTS,
+            "auth_codes": AUTH_CODES,
+            "sessions": SESSIONS,
+        }
+        tmp_path = AUTH_STATE_FILE + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(AUTH_STATE_FILE), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp_path, AUTH_STATE_FILE)
+        except Exception as e:
+            print("AUTH STATE SAVE: failed to write AUTH_STATE.json:", repr(e))
+
+
+def _load_auth_state_from_disk() -> None:
+    """
+    Load auth state from AUTH_STATE.json if it exists and is valid JSON.
+    Drops expired auth codes on load.
+    """
+    with AUTH_STATE_LOCK:
+        try:
+            if not os.path.exists(AUTH_STATE_FILE):
+                return
+            raw = open(AUTH_STATE_FILE, "r", encoding="utf-8").read()
+            if not raw.strip():
+                return
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+
+            rc = data.get("registered_clients")
+            ac = data.get("auth_codes")
+            ss = data.get("sessions")
+
+            if isinstance(rc, dict):
+                REGISTERED_CLIENTS.clear()
+                REGISTERED_CLIENTS.update({str(k): v for k, v in rc.items() if isinstance(v, dict)})
+
+            if isinstance(ss, dict):
+                SESSIONS.clear()
+                SESSIONS.update({str(k): v for k, v in ss.items() if isinstance(v, dict)})
+
+            # Auth codes are short-lived; drop expired on load.
+            if isinstance(ac, dict):
+                AUTH_CODES.clear()
+                now = int(time.time())
+                for k, v in ac.items():
+                    if not isinstance(v, dict):
+                        continue
+                    exp = v.get("expires_at")
+                    if isinstance(exp, int) and now > exp:
+                        continue
+                    AUTH_CODES[str(k)] = v
+        except Exception as e:
+            print("AUTH STATE LOAD: failed to load AUTH_STATE.json:", repr(e))
+
+
+# Initialize auth state on import
+_load_auth_state_from_disk()
 
 
 def _safe_next_path(next_path: Any) -> str:
@@ -57,7 +139,8 @@ def _get_username_from_session(request: Request) -> str | None:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
         return None
-    rec = SESSIONS.get(sid)
+    with AUTH_STATE_LOCK:
+        rec = SESSIONS.get(sid)
     if not rec:
         return None
     username = rec.get("username")
@@ -120,7 +203,9 @@ async def login_submit(
     next_path = _safe_next_path(next)
 
     sid = f"sess_{uuid.uuid4().hex}"
-    SESSIONS[sid] = {"username": uname, "created_at": int(time.time())}
+    with AUTH_STATE_LOCK:
+        SESSIONS[sid] = {"username": uname, "created_at": int(time.time())}
+    _persist_auth_state_to_disk()
 
     resp = RedirectResponse(url=next_path, status_code=302)
     # Toy cookie (in production you’d set Secure=True behind HTTPS, and consider SameSite).
@@ -139,7 +224,9 @@ async def login_submit(
 async def logout(request: Request) -> RedirectResponse:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if sid:
-        SESSIONS.pop(sid, None)
+        with AUTH_STATE_LOCK:
+            SESSIONS.pop(sid, None)
+        _persist_auth_state_to_disk()
     resp = RedirectResponse(url="/", status_code=302)
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return resp
@@ -184,6 +271,10 @@ def _issue_access_token(*, subject: str, scopes: list[str], client_id: str | Non
         # Useful for tracing which OAuth client obtained the token.
         payload["client_id"] = client_id
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+    if DEBUG_LOG_TOKENS:
+        # WARNING: This logs bearer tokens. Use only for local debugging.
+        print("ISSUED JWT: subject(sub)=", subject, " client_id=", client_id, " scopes=", scopes)
+        print("ISSUED JWT (masked):", _mask_token(token))
     return {
         "access_token": token,
         "token_type": "Bearer",
@@ -222,6 +313,14 @@ def _dbg_present(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip() != ""
     return True
+
+
+def _mask_token(token: str, *, head: int = 16, tail: int = 8) -> str:
+    if not token:
+        return ""
+    if len(token) <= head + tail + 3:
+        return token
+    return f"{token[:head]}...{token[-tail:]}"
 
 
 # -------------------------------------------------------------------
@@ -269,12 +368,14 @@ async def register_client(body: dict[str, Any]):
     if requested_auth_method != "none":
         client_secret = f"secret_{uuid.uuid4().hex}"
 
-    REGISTERED_CLIENTS[client_id] = {
-        "redirect_uris": redirect_uris,
-        "token_endpoint_auth_method": requested_auth_method,
-        "client_secret": client_secret,
-        "created_at": int(time.time()),
-    }
+    with AUTH_STATE_LOCK:
+        REGISTERED_CLIENTS[client_id] = {
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": requested_auth_method,
+            "client_secret": client_secret,
+            "created_at": int(time.time()),
+        }
+    _persist_auth_state_to_disk()
 
     resp: dict[str, Any] = {
         "client_id": client_id,
@@ -316,7 +417,8 @@ async def authorize(
     if response_type != "code":
         raise HTTPException(status_code=400, detail="unsupported_response_type")
 
-    client = REGISTERED_CLIENTS.get(client_id)
+    with AUTH_STATE_LOCK:
+        client = REGISTERED_CLIENTS.get(client_id)
     if not client:
         raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -334,16 +436,18 @@ async def authorize(
             raise HTTPException(status_code=400, detail="unsupported_code_challenge_method")
 
     code = f"code_{uuid.uuid4().hex}"
-    AUTH_CODES[code] = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "username": username,
-        "scopes": scopes,
-        "code_challenge": code_challenge,
-        "code_challenge_method": code_challenge_method or ("plain" if code_challenge else None),
-        "expires_at": int(time.time()) + 5 * 60,
-        "resource": resource,
-    }
+    with AUTH_STATE_LOCK:
+        AUTH_CODES[code] = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "username": username,
+            "scopes": scopes,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method or ("plain" if code_challenge else None),
+            "expires_at": int(time.time()) + 5 * 60,
+            "resource": resource,
+        }
+    _persist_auth_state_to_disk()
 
     params = {"code": code}
     if state:
@@ -436,7 +540,8 @@ async def token(request: Request):
         if not code or not redirect_uri or not client_id:
             raise HTTPException(status_code=400, detail="missing code/redirect_uri/client_id")
 
-        client = REGISTERED_CLIENTS.get(client_id)
+        with AUTH_STATE_LOCK:
+            client = REGISTERED_CLIENTS.get(client_id)
         if not client:
             raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -447,12 +552,15 @@ async def token(request: Request):
             if not expected or not client_secret or client_secret != expected:
                 raise HTTPException(status_code=401, detail="invalid_client")
 
-        record = AUTH_CODES.get(code)
+        with AUTH_STATE_LOCK:
+            record = AUTH_CODES.get(code)
         if not record:
             raise HTTPException(status_code=400, detail="invalid_code")
 
         if int(time.time()) > int(record["expires_at"]):
-            AUTH_CODES.pop(code, None)
+            with AUTH_STATE_LOCK:
+                AUTH_CODES.pop(code, None)
+            _persist_auth_state_to_disk()
             raise HTTPException(status_code=400, detail="expired_code")
 
         if record["client_id"] != client_id or record["redirect_uri"] != redirect_uri:
@@ -479,7 +587,9 @@ async def token(request: Request):
                 raise HTTPException(status_code=400, detail="invalid_code_verifier")
 
         # one-time use
-        AUTH_CODES.pop(code, None)
+        with AUTH_STATE_LOCK:
+            AUTH_CODES.pop(code, None)
+        _persist_auth_state_to_disk()
 
         # Include resource as audience if present (nice-to-have)
         username = record.get("username")
