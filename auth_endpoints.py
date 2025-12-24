@@ -4,34 +4,42 @@ from urllib.parse import urlparse, parse_qs
 
 import base64
 import hashlib
-import json
-import os
+import logging
 import threading
 import time
 import uuid
 from typing import Any, Optional
 from urllib.parse import urlencode
+from pathlib import Path
 
 import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from json_store import atomic_write_json, read_json  # type: ignore[import-not-found]
+from settings import get_settings
+
 router = APIRouter(tags=["auth"])
+logger = logging.getLogger(__name__)
+
+# Centralized settings
+SETTINGS = get_settings()
 
 # -------------------------------------------------------------------
 # CONFIG (toy)
 # -------------------------------------------------------------------
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-super-secret")
-JWT_ALG = "HS256"
-DEBUG_LOG_TOKENS = os.getenv("DEBUG_LOG_TOKENS", "0").lower() in ("1", "true", "yes", "on")
+JWT_SECRET = SETTINGS.jwt_secret
+JWT_ALG = SETTINGS.jwt_alg
+DEBUG_LOG_TOKENS = SETTINGS.debug_log_tokens
+DEBUG_LOG_REQUESTS = SETTINGS.debug_log_requests
 
 # Set this when using ngrok:
 #   export PUBLIC_BASE_URL="https://harsh-jordy-horribly.ngrok-free.dev"
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+PUBLIC_BASE_URL = SETTINGS.public_base_url
 
 # ✅ Exported constant: other files can import this
-DEFAULT_LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-ISSUER = PUBLIC_BASE_URL or DEFAULT_LOCAL_BASE_URL
+DEFAULT_LOCAL_BASE_URL = SETTINGS.local_base_url
+ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
@@ -43,7 +51,7 @@ SESSIONS: dict[str, dict[str, Any]] = {}  # session_id -> { "username": str, "cr
 
 AUTH_STATE_LOCK = threading.Lock()
 # Persist toy auth state to a separate JSON file in the project directory.
-AUTH_STATE_FILE = os.path.join(os.path.dirname(__file__), "AUTH_STATE.json")
+AUTH_STATE_FILE = Path(__file__).with_name("AUTH_STATE.json")
 
 
 def _persist_auth_state_to_disk() -> None:
@@ -58,20 +66,17 @@ def _persist_auth_state_to_disk() -> None:
       }
     """
     with AUTH_STATE_LOCK:
+        if not SETTINGS.persist_to_disk:
+            return
         payload = {
             "registered_clients": REGISTERED_CLIENTS,
             "auth_codes": AUTH_CODES,
             "sessions": SESSIONS,
         }
-        tmp_path = AUTH_STATE_FILE + ".tmp"
         try:
-            os.makedirs(os.path.dirname(AUTH_STATE_FILE), exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, sort_keys=True)
-                f.write("\n")
-            os.replace(tmp_path, AUTH_STATE_FILE)
+            atomic_write_json(AUTH_STATE_FILE, payload)
         except Exception as e:
-            print("AUTH STATE SAVE: failed to write AUTH_STATE.json:", repr(e))
+            logger.warning("AUTH STATE SAVE: failed to write %s: %r", AUTH_STATE_FILE, e)
 
 
 def _load_auth_state_from_disk() -> None:
@@ -81,12 +86,9 @@ def _load_auth_state_from_disk() -> None:
     """
     with AUTH_STATE_LOCK:
         try:
-            if not os.path.exists(AUTH_STATE_FILE):
+            if not SETTINGS.persist_to_disk:
                 return
-            raw = open(AUTH_STATE_FILE, "r", encoding="utf-8").read()
-            if not raw.strip():
-                return
-            data = json.loads(raw)
+            data = read_json(AUTH_STATE_FILE)
             if not isinstance(data, dict):
                 return
 
@@ -114,7 +116,7 @@ def _load_auth_state_from_disk() -> None:
                         continue
                     AUTH_CODES[str(k)] = v
         except Exception as e:
-            print("AUTH STATE LOAD: failed to load AUTH_STATE.json:", repr(e))
+            logger.warning("AUTH STATE LOAD: failed to load %s: %r", AUTH_STATE_FILE, e)
 
 
 # Initialize auth state on import
@@ -238,8 +240,8 @@ REGISTERED_CLIENTS: dict[str, dict[str, Any]] = {}
 AUTH_CODES: dict[str, dict[str, Any]] = {}
 
 # Optional manual client (for curl client_credentials)
-STATIC_CLIENT_ID = os.getenv("STATIC_CLIENT_ID", "toy-client")
-STATIC_CLIENT_SECRET = os.getenv("STATIC_CLIENT_SECRET", "toy-secret")
+STATIC_CLIENT_ID = SETTINGS.static_client_id
+STATIC_CLIENT_SECRET = SETTINGS.static_client_secret
 
 
 # -------------------------------------------------------------------
@@ -273,8 +275,8 @@ def _issue_access_token(*, subject: str, scopes: list[str], client_id: str | Non
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
     if DEBUG_LOG_TOKENS:
         # WARNING: This logs bearer tokens. Use only for local debugging.
-        print("ISSUED JWT: subject(sub)=", subject, " client_id=", client_id, " scopes=", scopes)
-        print("ISSUED JWT (masked):", _mask_token(token))
+        logger.debug("ISSUED JWT: sub=%s client_id=%s scopes=%s", subject, client_id, scopes)
+        logger.debug("ISSUED JWT (masked): %s", _mask_token(token))
     return {
         "access_token": token,
         "token_type": "Bearer",
@@ -466,19 +468,16 @@ async def token(request: Request):
     content_type = (request.headers.get("content-type") or "").lower()
     data: dict[str, Any] = {}
 
-    # Debug envelope (avoid logging secrets)
-    try:
-        xff = request.headers.get("x-forwarded-for")
-        ua = request.headers.get("user-agent")
-        origin = request.headers.get("origin")
-        accept = request.headers.get("accept")
-        print("TOKEN REQUEST: url=", str(request.url))
-        print("TOKEN REQUEST: content-type=", content_type)
-        print("TOKEN REQUEST: x-forwarded-for=", xff)
-        print("TOKEN REQUEST: user-agent=", ua)
-        print("TOKEN REQUEST: origin=", origin, " accept=", accept)
-    except Exception:
-        pass
+    if DEBUG_LOG_REQUESTS:
+        logger.info(
+            "TOKEN REQUEST: url=%s content_type=%s xff=%s ua=%s origin=%s accept=%s",
+            str(request.url),
+            content_type,
+            request.headers.get("x-forwarded-for"),
+            request.headers.get("user-agent"),
+            request.headers.get("origin"),
+            request.headers.get("accept"),
+        )
 
     if "application/json" in content_type:
         try:
@@ -488,27 +487,33 @@ async def token(request: Request):
     else:
         form = await request.form()
         # Starlette forms can include repeated keys; log counts before coercing.
-        try:
-            # type: ignore[attr-defined]
-            multi = form.multi_items()
-            counts: dict[str, int] = {}
-            for k, _v in multi:
-                counts[k] = counts.get(k, 0) + 1
-            print("TOKEN REQUEST form key counts:", counts)
-        except Exception:
-            pass
+        if DEBUG_LOG_REQUESTS:
+            try:
+                # type: ignore[attr-defined]
+                multi = form.multi_items()
+                counts: dict[str, int] = {}
+                for k, _v in multi:
+                    counts[k] = counts.get(k, 0) + 1
+                logger.info("TOKEN REQUEST form key counts: %s", counts)
+            except Exception:
+                logger.debug("TOKEN REQUEST: failed to inspect multipart form", exc_info=True)
         data = dict(form)
 
     # SAFE debug: show only keys (not secrets)
-    print("TOKEN REQUEST keys:", sorted(list(data.keys())))
+    if DEBUG_LOG_REQUESTS:
+        logger.info("TOKEN REQUEST keys: %s", sorted(list(data.keys())))
     # If you need more debugging, print selected fields only:
     for k in ("grant_type", "client_id", "redirect_uri", "resource", "scope"):
         if k in data:
-            print(f"TOKEN {k}:", data.get(k))
+            if DEBUG_LOG_REQUESTS:
+                logger.info("TOKEN %s: %s", k, data.get(k))
     # Sensitive-ish fields: log presence/length only
     for k in ("code", "code_verifier", "client_secret", "refresh_token"):
         if k in data:
-            print(f"TOKEN {k}: present={_dbg_present(data.get(k))} len={_dbg_len(data.get(k))}")
+            if DEBUG_LOG_REQUESTS:
+                logger.info(
+                    "TOKEN %s: present=%s len=%s", k, _dbg_present(data.get(k)), _dbg_len(data.get(k))
+                )
 
     grant_type = data.get("grant_type")
 

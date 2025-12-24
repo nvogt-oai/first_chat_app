@@ -1,13 +1,14 @@
 # mcp_endpoints.py
 from __future__ import annotations
 
-import json
+import logging
 import os
 import re
 import threading
 from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 import jwt
@@ -20,12 +21,17 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 from auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
+from json_store import atomic_write_json, read_json  # type: ignore[import-not-found]
+from settings import get_settings
 
 REQUIRED_SCOPES = ["toy.read"]
-DEBUG_LOG_TOKENS = os.getenv("DEBUG_LOG_TOKENS", "0").lower() in ("1", "true", "yes", "on")
+SETTINGS = get_settings()
+DEBUG_LOG_TOKENS = SETTINGS.debug_log_tokens
+
+logger = logging.getLogger(__name__)
 
 ISSUER_URL = AnyHttpUrl(ISSUER)
-RESOURCE_SERVER_URL = AnyHttpUrl("http://localhost:8000/mcp")
+RESOURCE_SERVER_URL = AnyHttpUrl(SETTINGS.resource_server_url)
 
 YYYY_MM_DD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 Meal = Literal["breakfast", "lunch", "dinner", "snack"]
@@ -126,12 +132,9 @@ def _load_state_from_disk() -> None:
     """
     with STATE_LOCK:
         try:
-            if not os.path.exists(DATA_FILE):
+            if not SETTINGS.persist_to_disk:
                 return
-            raw = open(DATA_FILE, "r", encoding="utf-8").read()
-            if not raw.strip():
-                return
-            data = json.loads(raw)
+            data = read_json(Path(DATA_FILE))
             if not isinstance(data, dict):
                 return
 
@@ -178,7 +181,7 @@ def _load_state_from_disk() -> None:
             STATE_BY_USER.clear()
             STATE_BY_USER["default"] = legacy
         except Exception as e:
-            print("DATA LOAD: failed to load DATA.json:", repr(e))
+            logger.warning("DATA LOAD: failed to load %s: %r", DATA_FILE, e)
 
 
 def _persist_state_to_disk() -> None:
@@ -186,6 +189,8 @@ def _persist_state_to_disk() -> None:
     Atomically write STATE_BY_USER to DATA.json (toy persistence).
     """
     with STATE_LOCK:
+        if not SETTINGS.persist_to_disk:
+            return
         users_payload: dict[str, Any] = {}
         for user_id, st in STATE_BY_USER.items():
             users_payload[user_id] = {
@@ -194,15 +199,10 @@ def _persist_state_to_disk() -> None:
                 "daily_goal_calories": st.daily_goal_calories,
             }
         payload = {"users": users_payload}
-        tmp_path = DATA_FILE + ".tmp"
         try:
-            os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, sort_keys=True)
-                f.write("\n")
-            os.replace(tmp_path, DATA_FILE)
+            atomic_write_json(Path(DATA_FILE), payload)
         except Exception as e:
-            print("DATA SAVE: failed to write DATA.json:", repr(e))
+            logger.warning("DATA SAVE: failed to write %s: %r", DATA_FILE, e)
 
 
 # Initialize state on import
@@ -302,7 +302,7 @@ class JwtTokenVerifier(TokenVerifier):
                 options={"require": ["exp", "sub", "iss"]},
             )
         except jwt.PyJWTError as e:
-            print("MCP VERIFY: jwt decode failed:", repr(e))
+            logger.info("MCP VERIFY: jwt decode failed: %r", e)
             return None
 
         iss = payload.get("iss")
@@ -312,27 +312,31 @@ class JwtTokenVerifier(TokenVerifier):
 
         if DEBUG_LOG_TOKENS:
             # WARNING: Logging bearer tokens is sensitive. Use only for local debugging.
-            print("MCP VERIFY: raw token (masked):", (token[:16] + "...") if isinstance(token, str) else token)
-            print("MCP VERIFY: claims: iss=", iss, " sub(username)=", sub, " client_id=", client_id_claim, " scp=", scopes)
-        else:
-            print("MCP VERIFY: iss=", iss, " expected=", ISSUER)
-            print("MCP VERIFY: sub=", sub)
-            print("MCP VERIFY: scopes=", scopes)
+            masked = (token[:16] + "...") if isinstance(token, str) else str(token)
+            logger.debug(
+                "MCP VERIFY: token=%s iss=%s sub=%s client_id=%s scp=%s",
+                masked,
+                iss,
+                sub,
+                client_id_claim,
+                scopes,
+            )
+        logger.debug("MCP VERIFY: iss=%s expected=%s sub=%s scopes=%s", iss, ISSUER, sub, scopes)
 
         if iss != ISSUER:
-            print("MCP VERIFY: issuer mismatch")
+            logger.info("MCP VERIFY: issuer mismatch (got=%s expected=%s)", iss, ISSUER)
             return None
 
         if not isinstance(sub, str) or not sub:
-            print("MCP VERIFY: bad sub")
+            logger.info("MCP VERIFY: bad sub")
             return None
 
         if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-            print("MCP VERIFY: bad scopes")
+            logger.info("MCP VERIFY: bad scopes")
             return None
 
         if any(req not in scopes for req in REQUIRED_SCOPES):
-            print("MCP VERIFY: missing required scopes", REQUIRED_SCOPES)
+            logger.info("MCP VERIFY: missing required scopes %s", REQUIRED_SCOPES)
             return None
 
         exp = payload.get("exp")

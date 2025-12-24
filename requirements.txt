@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn[standard]>=0.23
+PyJWT>=2.8
+pydantic>=2.5
+python-dotenv>=1.0
+
+# MCP server SDK (package name may vary depending on how you installed it originally)
+mcp>=1.0
+
+

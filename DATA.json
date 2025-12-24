@@ -18,6 +18,25 @@
         }
       ],
       "next_id": 2
+    },
+    "nvogt1": {
+      "daily_goal_calories": 2300,
+      "entries": [],
+      "next_id": 1
+    },
+    "nvogt2": {
+      "daily_goal_calories": 2500,
+      "entries": [
+        {
+          "calories": 1300,
+          "createdAt": "2025-12-24T14:57:58.833659",
+          "date": "2025-12-24",
+          "food": "Chorip\u00e1n sandwich (whole)",
+          "id": "entry-1",
+          "notes": "Adjusted to double the earlier estimate for a whole sandwich."
+        }
+      ],
+      "next_id": 2
     }
   }
 }

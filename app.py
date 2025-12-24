@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import contextlib
+import logging
+
+# Load local environment variables early (before importing modules that read env vars).
+from dotenv import load_dotenv
+
+load_dotenv("local.env")
+
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from auth_endpoints import ISSUER, router as auth_router
 from mcp_endpoints import mcp
+
+logger = logging.getLogger(__name__)
 
 # MCP lives at /mcp/ (note the trailing slash matters for some clients)
 mcp.settings.streamable_http_path = "/"
@@ -27,7 +36,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-from fastapi.responses import RedirectResponse
 
 @app.post("/mcp")
 async def mcp_redirect_post():
@@ -53,27 +61,6 @@ async def oauth_protected_resource_metadata():
 @app.get("/.well-known/oauth-protected-resource/{rest:path}")
 async def oauth_protected_resource_metadata_alias(rest: str):
     return await oauth_protected_resource_metadata()
-
-# ---- Authorization Server metadata at ROOT (use public ISSUER) ----
-@app.get("/.well-known/oauth-authorization-server")
-async def oauth_as_metadata_root():
-    return JSONResponse(
-        {
-            "issuer": ISSUER,
-            "authorization_endpoint": f"{ISSUER}/oauth/authorize",
-            "token_endpoint": f"{ISSUER}/oauth/token",
-            "registration_endpoint": f"{ISSUER}/oauth/register",
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code", "client_credentials"],
-            "code_challenge_methods_supported": ["S256", "plain"],
-            "scopes_supported": ["toy.read"],
-            "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
-        }
-    )
-
-@app.get("/.well-known/openid-configuration")
-async def openid_config_root():
-    return await oauth_as_metadata_root()
 
 # Include auth routes (this router already defines /oauth/* and /.well-known/* paths)
 app.include_router(auth_router)

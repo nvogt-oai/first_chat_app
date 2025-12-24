@@ -1,9 +1,9 @@
 {
   "auth_codes": {},
   "registered_clients": {
-    "client_ce5482aaaae34b4b85d4d55f1ca4ef79": {
+    "client_173bdb30c5ea41d99ab75ed5e328a601": {
       "client_secret": null,
-      "created_at": 1766614238,
+      "created_at": 1766618221,
       "redirect_uris": [
         "https://chatgpt.com/connector_platform_oauth_redirect"
       ],
@@ -11,9 +11,9 @@
     }
   },
   "sessions": {
-    "sess_a6a21276ba904934b099a95f08594bb4": {
-      "created_at": 1766614263,
-      "username": "nvogt"
+    "sess_f23a8ba93fdc41f495a1e524ca89a39a": {
+      "created_at": 1766618232,
+      "username": "nvogt1"
     }
   }
 }
