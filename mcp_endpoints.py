@@ -13,6 +13,7 @@ from pydantic import AnyHttpUrl
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
 
@@ -196,6 +197,9 @@ mcp = FastMCP(
         resource_server_url=RESOURCE_SERVER_URL,
         required_scopes=REQUIRED_SCOPES,
     ),
+    # Toy / ngrok friendly: FastMCP auto-enables DNS rebinding protection when it thinks it's running
+    # on localhost, which rejects ngrok Host headers and returns 421. Disable for this toy app.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
 

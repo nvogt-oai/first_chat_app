@@ -11,8 +11,8 @@ from typing import Any, Optional
 from urllib.parse import urlencode
 
 import jwt
-from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, Form, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 router = APIRouter(tags=["auth"])
 
@@ -31,6 +31,118 @@ DEFAULT_LOCAL_BASE_URL = os.getenv("LOCAL_BASE_URL", "http://127.0.0.1:8000").rs
 ISSUER = PUBLIC_BASE_URL or DEFAULT_LOCAL_BASE_URL
 
 SCOPES_SUPPORTED = ["toy.read"]
+
+# -------------------------------------------------------------------
+# Toy "user login" (username only) with in-memory sessions
+# -------------------------------------------------------------------
+SESSION_COOKIE_NAME = "toy_session"
+SESSIONS: dict[str, dict[str, Any]] = {}  # session_id -> { "username": str, "created_at": int }
+
+
+def _safe_next_path(next_path: Any) -> str:
+    """
+    Only allow relative paths (prevent open redirects).
+    """
+    if not isinstance(next_path, str):
+        return "/"
+    s = next_path.strip()
+    if not s:
+        return "/"
+    if s.startswith("/") and not s.startswith("//"):
+        return s
+    return "/"
+
+
+def _get_username_from_session(request: Request) -> str | None:
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if not sid:
+        return None
+    rec = SESSIONS.get(sid)
+    if not rec:
+        return None
+    username = rec.get("username")
+    if isinstance(username, str) and username.strip():
+        return username.strip()
+    return None
+
+
+@router.get("/login")
+async def login_page(request: Request, next: str = "/") -> HTMLResponse:
+    next_path = _safe_next_path(next)
+    username = _get_username_from_session(request)
+    if username:
+        return HTMLResponse(
+            f"""
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Toy Login</title></head>
+  <body>
+    <h2>Toy Login</h2>
+    <p>Already logged in as <strong>{username}</strong>.</p>
+    <p><a href="{next_path}">Continue</a></p>
+    <form method="post" action="/logout">
+      <button type="submit">Log out</button>
+    </form>
+  </body>
+</html>
+""".strip(),
+            status_code=200,
+        )
+    return HTMLResponse(
+        f"""
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Toy Login</title></head>
+  <body>
+    <h2>Toy Login</h2>
+    <p>This is a toy app: enter any username; no password.</p>
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{next_path}" />
+      <label>Username <input name="username" /></label>
+      <button type="submit">Log in</button>
+    </form>
+  </body>
+</html>
+""".strip(),
+        status_code=200,
+    )
+
+
+@router.post("/login")
+async def login_submit(
+    response: Response,
+    username: str = Form(...),
+    next: str = Form("/"),
+) -> RedirectResponse:
+    uname = username.strip()
+    if not uname:
+        raise HTTPException(status_code=400, detail="username is required")
+    next_path = _safe_next_path(next)
+
+    sid = f"sess_{uuid.uuid4().hex}"
+    SESSIONS[sid] = {"username": uname, "created_at": int(time.time())}
+
+    resp = RedirectResponse(url=next_path, status_code=302)
+    # Toy cookie (in production you’d set Secure=True behind HTTPS, and consider SameSite).
+    resp.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=sid,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+    )
+    return resp
+
+
+@router.post("/logout")
+async def logout(request: Request) -> RedirectResponse:
+    sid = request.cookies.get(SESSION_COOKIE_NAME)
+    if sid:
+        SESSIONS.pop(sid, None)
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return resp
 
 # -------------------------------------------------------------------
 # In-memory stores (toy; resets on restart)
@@ -57,7 +169,7 @@ def _b64url_no_pad(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
-def _issue_access_token(subject: str, scopes: list[str]) -> dict[str, Any]:
+def _issue_access_token(*, subject: str, scopes: list[str], client_id: str | None = None) -> dict[str, Any]:
     now = int(time.time())
     exp = now + 60 * 60  # 1 hour
 
@@ -68,6 +180,9 @@ def _issue_access_token(subject: str, scopes: list[str]) -> dict[str, Any]:
         "exp": exp,
         "scp": scopes,
     }
+    if client_id:
+        # Useful for tracing which OAuth client obtained the token.
+        payload["client_id"] = client_id
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
     return {
         "access_token": token,
@@ -89,6 +204,24 @@ def _get_client_auth(request: Request) -> tuple[Optional[str], Optional[str]]:
         return client_id, client_secret
     except Exception:
         return None, None
+
+
+def _dbg_len(value: Any) -> str:
+    if value is None:
+        return "none"
+    try:
+        s = str(value)
+    except Exception:
+        return "unprintable"
+    return str(len(s))
+
+
+def _dbg_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    return True
 
 
 # -------------------------------------------------------------------
@@ -163,6 +296,7 @@ async def register_client(body: dict[str, Any]):
 # -------------------------------------------------------------------
 @router.get("/oauth/authorize")
 async def authorize(
+    request: Request,
     response_type: str,
     client_id: str,
     redirect_uri: str,
@@ -172,6 +306,13 @@ async def authorize(
     code_challenge_method: Optional[str] = None,
     resource: Optional[str] = None,
 ):
+    # Require a toy "logged in" user (username-only session).
+    username = _get_username_from_session(request)
+    if not username:
+        # Preserve the full authorize URL as a relative path for a post-login redirect.
+        next_path = _safe_next_path(str(request.url.path) + (f"?{request.url.query}" if request.url.query else ""))
+        return RedirectResponse(url=f"/login?{urlencode({'next': next_path})}", status_code=302)
+
     if response_type != "code":
         raise HTTPException(status_code=400, detail="unsupported_response_type")
 
@@ -196,6 +337,7 @@ async def authorize(
     AUTH_CODES[code] = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
+        "username": username,
         "scopes": scopes,
         "code_challenge": code_challenge,
         "code_challenge_method": code_challenge_method or ("plain" if code_challenge else None),
@@ -220,6 +362,20 @@ async def token(request: Request):
     content_type = (request.headers.get("content-type") or "").lower()
     data: dict[str, Any] = {}
 
+    # Debug envelope (avoid logging secrets)
+    try:
+        xff = request.headers.get("x-forwarded-for")
+        ua = request.headers.get("user-agent")
+        origin = request.headers.get("origin")
+        accept = request.headers.get("accept")
+        print("TOKEN REQUEST: url=", str(request.url))
+        print("TOKEN REQUEST: content-type=", content_type)
+        print("TOKEN REQUEST: x-forwarded-for=", xff)
+        print("TOKEN REQUEST: user-agent=", ua)
+        print("TOKEN REQUEST: origin=", origin, " accept=", accept)
+    except Exception:
+        pass
+
     if "application/json" in content_type:
         try:
             data = await request.json()
@@ -227,14 +383,28 @@ async def token(request: Request):
             data = {}
     else:
         form = await request.form()
+        # Starlette forms can include repeated keys; log counts before coercing.
+        try:
+            # type: ignore[attr-defined]
+            multi = form.multi_items()
+            counts: dict[str, int] = {}
+            for k, _v in multi:
+                counts[k] = counts.get(k, 0) + 1
+            print("TOKEN REQUEST form key counts:", counts)
+        except Exception:
+            pass
         data = dict(form)
 
     # SAFE debug: show only keys (not secrets)
     print("TOKEN REQUEST keys:", sorted(list(data.keys())))
     # If you need more debugging, print selected fields only:
-    for k in ("grant_type", "client_id", "redirect_uri", "code", "resource"):
+    for k in ("grant_type", "client_id", "redirect_uri", "resource", "scope"):
         if k in data:
             print(f"TOKEN {k}:", data.get(k))
+    # Sensitive-ish fields: log presence/length only
+    for k in ("code", "code_verifier", "client_secret", "refresh_token"):
+        if k in data:
+            print(f"TOKEN {k}: present={_dbg_present(data.get(k))} len={_dbg_len(data.get(k))}")
 
     grant_type = data.get("grant_type")
 
@@ -312,7 +482,10 @@ async def token(request: Request):
         AUTH_CODES.pop(code, None)
 
         # Include resource as audience if present (nice-to-have)
-        token_payload = _issue_access_token(subject=client_id, scopes=record["scopes"])
+        username = record.get("username")
+        if not isinstance(username, str) or not username.strip():
+            raise HTTPException(status_code=400, detail="invalid_code_user")
+        token_payload = _issue_access_token(subject=username.strip(), scopes=record["scopes"], client_id=client_id)
         # If you want aud, change _issue_access_token to accept aud/resource and include it.
 
         return JSONResponse(token_payload)
@@ -330,6 +503,7 @@ async def token(request: Request):
             if s not in SCOPES_SUPPORTED:
                 raise HTTPException(status_code=400, detail=f"unsupported_scope: {s}")
 
-        return JSONResponse(_issue_access_token(subject=client_id, scopes=scopes))
+        # client_credentials is client-only (no user)
+        return JSONResponse(_issue_access_token(subject=client_id, scopes=scopes, client_id=client_id))
 
     raise HTTPException(status_code=400, detail="unsupported_grant_type")
