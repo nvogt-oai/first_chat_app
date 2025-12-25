@@ -28,7 +28,7 @@ make run
 
 This repo uses `python-dotenv` to load `local.env` automatically when you import `app.py`.
 
-If `NGROK_AUTHTOKEN` is set (and `ngrok` is installed), `make run` will start an ngrok tunnel automatically. This is intended for **local development only** (don’t use ngrok in production).
+If `NGROK_AUTHTOKEN` is set (and `npx` is available), `make run` will start an ngrok tunnel automatically via `npx`. This is intended for **local development only** (don’t use ngrok in production).
 
 ### Env vars (optional)
 

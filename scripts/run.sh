@@ -37,11 +37,16 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # If NGROK_AUTHTOKEN is set and ngrok is installed, start an ngrok tunnel too.
-if [ -n "${NGROK_AUTHTOKEN:-}" ] && command -v ngrok >/dev/null 2>&1; then
-  ngrok config add-authtoken "$NGROK_AUTHTOKEN" >/dev/null
-  ngrok http "$PORT" --log=stdout &
-  NGROK_PID=$!
-  echo "ngrok started (tunneling :$PORT)."
+if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+  if command -v npx >/dev/null 2>&1; then
+    # Use npx so we don't require a globally-installed ngrok binary and we avoid writing config files.
+    npx --yes ngrok http "$PORT" --log=stdout &
+    NGROK_PID=$!
+    echo "ngrok started via npx (tunneling :$PORT)."
+  else
+    echo "NGROK_AUTHTOKEN is set but npx is not available; skipping ngrok."
+    echo "Install Node.js (for npx) or unset NGROK_AUTHTOKEN."
+  fi
 fi
 
 uvicorn "${UVICORN_ARGS[@]}" &
