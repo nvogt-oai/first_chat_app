@@ -24,6 +24,14 @@ Run:
 make run
 ```
 
+### Clear local persisted state
+
+This app persists toy auth + calorie data to JSON files under `./data/`.
+
+```bash
+make reset-data
+```
+
 ### Local env file
 
 This repo uses `python-dotenv` to load `local.env` automatically when you import `app.py`.
