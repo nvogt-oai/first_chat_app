@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
-from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
@@ -53,21 +51,8 @@ class CalorieToolResponse(TypedDict, total=False):
     structuredContent: dict[str, Any]
 
 
-@dataclass
-class _State:
-    entries: list[CalorieEntryRecord]
-    next_id: int
-    daily_goal_calories: int | None
-
-
-STATE_LOCK = threading.Lock()
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CALORIE_REPO = DiskCalorieStateRepository()
-
-
-def _empty_state() -> _State:
-    return _State(entries=[], next_id=1, daily_goal_calories=None)
 
 
 def _get_user_id(ctx: Context | None) -> str:
@@ -101,24 +86,12 @@ def _get_user_id(ctx: Context | None) -> str:
     return "anonymous"
 
 
-def _load_state_for_user_locked(user_id: str) -> _State:
-    rec = CALORIE_REPO.get_user_state(user_id)
-    return _State(
-        entries=list(rec.entries),
-        next_id=int(rec.next_id) if isinstance(rec.next_id, int) else 1,
-        daily_goal_calories=rec.daily_goal_calories if isinstance(rec.daily_goal_calories, int) else None,
-    )
+def _load_state(user_id: str) -> UserCalorieStateRecord:
+    return CALORIE_REPO.get_user_state(user_id)
 
 
-def _save_state_for_user_locked(user_id: str, state: _State) -> None:
-    CALORIE_REPO.save_user_state(
-        user_id,
-        UserCalorieStateRecord(
-            entries=list(state.entries),
-            next_id=int(state.next_id),
-            daily_goal_calories=state.daily_goal_calories,
-        ),
-    )
+def _save_state(user_id: str, state: UserCalorieStateRecord) -> None:
+    CALORIE_REPO.save_user_state(user_id, state)
 
 
 def _format_local_date_yyyy_mm_dd(dt: datetime) -> str:
@@ -163,7 +136,7 @@ def _parse_goal_int_pos(value: Any) -> int | None:
     return n
 
 
-def _summarize_for_date(state: _State, yyyy_mm_dd: str) -> DailySummary:
+def _summarize_for_date(state: UserCalorieStateRecord, yyyy_mm_dd: str) -> DailySummary:
     day_entries = [e for e in state.entries if e.date == yyyy_mm_dd]
     total = sum(int(e.calories or 0) for e in day_entries)
     summary: DailySummary = {
@@ -171,9 +144,8 @@ def _summarize_for_date(state: _State, yyyy_mm_dd: str) -> DailySummary:
         "totalCalories": int(total),
         "entriesCount": len(day_entries),
     }
-    daily_goal = state.daily_goal_calories
-    if isinstance(daily_goal, int):
-        goal = daily_goal
+    if isinstance(state.daily_goal_calories, int):
+        goal = state.daily_goal_calories
         summary["goalCalories"] = goal
         summary["remainingCalories"] = max(0, goal - int(total))
     return summary
@@ -294,8 +266,7 @@ def log_food(
     now = datetime.now()
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(now)
     user_id = _get_user_id(ctx)
-    with STATE_LOCK:
-        state = _load_state_for_user_locked(user_id)
+    state = _load_state(user_id)
 
     if notes is not None:
         if not isinstance(notes, str) or not notes.strip():
@@ -303,9 +274,8 @@ def log_food(
         if len(notes) > 500:
             return _reply("Invalid input: `notes` must be <= 500 characters.")
 
-    with STATE_LOCK:
-        entry_id = f"entry-{state.next_id}"
-        state.next_id += 1
+    entry_id = f"entry-{state.next_id}"
+    state.next_id += 1
     entry = CalorieEntryRecord(
         id=entry_id,
         food=food.strip(),
@@ -316,9 +286,8 @@ def log_food(
         createdAt=now.isoformat(),
     )
 
-    with STATE_LOCK:
-        state.entries = [*state.entries, entry]
-        _save_state_for_user_locked(user_id, state)
+    state.entries = [*state.entries, entry]
+    _save_state(user_id, state)
     summary = _summarize_for_date(state, yyyy_mm_dd)
     return _reply(
         f'Logged {int(entry.calories or 0)} calories for "{entry.food or ""}" on {yyyy_mm_dd}.',
@@ -335,14 +304,12 @@ def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
     if not isinstance(id, str) or not id.strip():
         return _reply("Missing entry id.")
     user_id = _get_user_id(ctx)
-    with STATE_LOCK:
-        state = _load_state_for_user_locked(user_id)
-        entry = next((e for e in state.entries if e.id == id), None)
+    state = _load_state(user_id)
+    entry = next((e for e in state.entries if e.id == id), None)
     if entry is None:
         return _reply(f"Entry {id} was not found.", entries=list(state.entries))
-    with STATE_LOCK:
-        state.entries = [e for e in state.entries if e.id != id]
-        _save_state_for_user_locked(user_id, state)
+    state.entries = [e for e in state.entries if e.id != id]
+    _save_state(user_id, state)
     entry_date = str(entry.date or _format_local_date_yyyy_mm_dd(datetime.now()))
     summary = _summarize_for_date(state, entry_date)
     food = entry.food or "unknown"
@@ -357,16 +324,13 @@ def list_entries(date: str | None = None, ctx: Context | None = None) -> Calorie
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        with STATE_LOCK:
-            state = _load_state_for_user_locked(user_id)
+        state = _load_state(user_id)
         return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
     user_id = _get_user_id(ctx)
-    with STATE_LOCK:
-        state = _load_state_for_user_locked(user_id)
+    state = _load_state(user_id)
     if not parsed_date:
         return _reply("All entries:", entries=list(state.entries))
-    with STATE_LOCK:
-        filtered = [e for e in state.entries if e.date == parsed_date]
+    filtered = [e for e in state.entries if e.date == parsed_date]
     return _reply(
         f"Entries for {parsed_date}:",
         entries=filtered,
@@ -382,21 +346,18 @@ def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> Ca
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        with STATE_LOCK:
-            state = _load_state_for_user_locked(user_id)
+        state = _load_state(user_id)
         return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(datetime.now())
     user_id = _get_user_id(ctx)
-    with STATE_LOCK:
-        state = _load_state_for_user_locked(user_id)
+    state = _load_state(user_id)
     summary = _summarize_for_date(state, yyyy_mm_dd)
     goal_text = (
         f' Goal {summary.get("goalCalories")}, remaining {summary.get("remainingCalories")}.'
         if "goalCalories" in summary
         else ""
     )
-    with STATE_LOCK:
-        day_entries = [e for e in state.entries if e.date == yyyy_mm_dd]
+    day_entries = [e for e in state.entries if e.date == yyyy_mm_dd]
     return _reply(
         f'Total for {yyyy_mm_dd}: {summary["totalCalories"]} calories across {summary["entriesCount"]} entries.{goal_text}',
         entries=day_entries,
@@ -412,14 +373,12 @@ def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieTo
     goal = _parse_goal_int_pos(calories)
     if goal is None:
         user_id = _get_user_id(ctx)
-        with STATE_LOCK:
-            state = _load_state_for_user_locked(user_id)
+        state = _load_state(user_id)
         return _reply("Invalid goal calories.", entries=list(state.entries))
     user_id = _get_user_id(ctx)
-    with STATE_LOCK:
-        state = _load_state_for_user_locked(user_id)
-        state.daily_goal_calories = int(goal)
-        _save_state_for_user_locked(user_id, state)
+    state = _load_state(user_id)
+    state.daily_goal_calories = int(goal)
+    _save_state(user_id, state)
     today = _format_local_date_yyyy_mm_dd(datetime.now())
     return _reply(
         f"Set daily goal to {goal} calories.",
