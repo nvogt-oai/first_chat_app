@@ -4,14 +4,16 @@ import importlib
 from pathlib import Path
 import sys
 
+
 import pytest
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    # Ensure top-level imports like `import persistence` work even when pytest
-    # is invoked in an environment that doesn't add the repo root to sys.path.
-    sys.path.insert(0, str(PROJECT_ROOT))
+# Ensure the repository root (parent of ./tests) is importable during pytest collection.
+# This avoids ModuleNotFoundError for imports like `import persistence...` under pytest import modes
+# that don't automatically prepend the cwd/rootdir to sys.path.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 @pytest.fixture

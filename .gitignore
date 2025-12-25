@@ -39,6 +39,7 @@ env.example
 Thumbs.db
 .idea/
 .vscode/
+!.vscode/settings.json
 
 # App data (disk persistence)
 data/
