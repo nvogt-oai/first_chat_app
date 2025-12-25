@@ -12,23 +12,23 @@ Toy FastAPI app that exposes an MCP server protected by a minimal OAuth2 (author
 
 ### Run locally
 
-Install deps:
+Setup:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+make setup
 ```
 
 Run:
 
 ```bash
-uvicorn app:app --reload
+make run
 ```
 
 ### Local env file
 
 This repo uses `python-dotenv` to load `local.env` automatically when you import `app.py`.
+
+If `NGROK_AUTHTOKEN` is set (and `ngrok` is installed), `make run` will start an ngrok tunnel automatically. This is intended for **local development only** (don’t use ngrok in production).
 
 ### Env vars (optional)
 
