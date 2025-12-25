@@ -5,7 +5,6 @@ import hashlib
 import logging
 import time
 import uuid
-from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -15,10 +14,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from persistence.auth_state import (
     AuthCodeRecord,
-    DiskAuthStateRepository,
     RegisteredClientRecord,
     SessionRecord,
 )
+from persistence import repositories as persistence_repositories
 from settings import get_settings
 
 router = APIRouter(tags=["auth"])
@@ -38,7 +37,7 @@ ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
-AUTH_REPO = DiskAuthStateRepository()
+AUTH_REPO = persistence_repositories.AsyncDiskAuthRepository()
 
 STATIC_CLIENT_ID = SETTINGS.static_client_id
 STATIC_CLIENT_SECRET = SETTINGS.static_client_secret
@@ -60,11 +59,11 @@ def _safe_next_path(next_path: Any) -> str:
     return "/"
 
 
-def _get_username_from_session(request: Request) -> str | None:
+async def _get_username_from_session(request: Request) -> str | None:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
         return None
-    rec = AUTH_REPO.get_session(sid)
+    rec = await AUTH_REPO.get_session(sid)
     if not rec:
         return None
     username = rec.username
@@ -76,7 +75,7 @@ def _get_username_from_session(request: Request) -> str | None:
 @router.get("/login")
 async def login_page(request: Request, next: str = "/") -> HTMLResponse:
     next_path = _safe_next_path(next)
-    username = _get_username_from_session(request)
+    username = await _get_username_from_session(request)
     if username:
         return HTMLResponse(
             f"""
@@ -127,7 +126,7 @@ async def login_submit(
     next_path = _safe_next_path(next)
 
     sid = f"sess_{uuid.uuid4().hex}"
-    AUTH_REPO.put_session(sid, SessionRecord(username=uname, created_at=int(time.time())))
+    await AUTH_REPO.put_session(sid, SessionRecord(username=uname, created_at=int(time.time())))
 
     resp = RedirectResponse(url=next_path, status_code=302)
     # Toy cookie (in production you’d set Secure=True behind HTTPS, and consider SameSite).
@@ -146,7 +145,7 @@ async def login_submit(
 async def logout(request: Request) -> RedirectResponse:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if sid:
-        AUTH_REPO.delete_session(sid)
+        await AUTH_REPO.delete_session(sid)
     resp = RedirectResponse(url="/", status_code=302)
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return resp
@@ -269,7 +268,7 @@ async def register_client(body: dict[str, Any]):
     if requested_auth_method != "none":
         client_secret = f"secret_{uuid.uuid4().hex}"
 
-    AUTH_REPO.put_registered_client(
+    await AUTH_REPO.put_registered_client(
         client_id,
         RegisteredClientRecord(
             redirect_uris=redirect_uris,
@@ -307,7 +306,7 @@ async def authorize(
     resource: Optional[str] = None,
 ):
     # Require a toy "logged in" user (username-only session).
-    username = _get_username_from_session(request)
+    username: str | None = await _get_username_from_session(request)
     if not username:
         # Preserve the full authorize URL as a relative path for a post-login redirect.
         next_path = _safe_next_path(str(request.url.path) + (f"?{request.url.query}" if request.url.query else ""))
@@ -316,7 +315,7 @@ async def authorize(
     if response_type != "code":
         raise HTTPException(status_code=400, detail="unsupported_response_type")
 
-    client = AUTH_REPO.get_registered_client(client_id)
+    client = await AUTH_REPO.get_registered_client(client_id)
     if not client:
         raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -334,7 +333,7 @@ async def authorize(
             raise HTTPException(status_code=400, detail="unsupported_code_challenge_method")
 
     code = f"code_{uuid.uuid4().hex}"
-    AUTH_REPO.put_auth_code(
+    await AUTH_REPO.put_auth_code(
         code,
         AuthCodeRecord(
             client_id=client_id,
@@ -436,7 +435,7 @@ async def token(request: Request):
         if not code or not redirect_uri or not client_id:
             raise HTTPException(status_code=400, detail="missing code/redirect_uri/client_id")
 
-        client = AUTH_REPO.get_registered_client(str(client_id))
+        client = await AUTH_REPO.get_registered_client(str(client_id))
         if not client:
             raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -447,7 +446,7 @@ async def token(request: Request):
             if not expected or not client_secret or client_secret != expected:
                 raise HTTPException(status_code=401, detail="invalid_client")
 
-        record = AUTH_REPO.get_auth_code(str(code))
+        record = await AUTH_REPO.get_auth_code(str(code))
         if not record:
             raise HTTPException(status_code=400, detail="invalid_code")
 
@@ -474,7 +473,7 @@ async def token(request: Request):
                 raise HTTPException(status_code=400, detail="invalid_code_verifier")
 
         # one-time use
-        AUTH_REPO.pop_auth_code(str(code))
+        await AUTH_REPO.pop_auth_code(str(code))
 
         username = record.username
         if not username.strip():

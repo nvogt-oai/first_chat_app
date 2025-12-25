@@ -51,38 +51,26 @@ class CalorieToolResponse(TypedDict, total=False):
     structuredContent: dict[str, Any]
 
 
-CALORIE_REPO = persistence_repositories.DiskCalorieRepository()
+CALORIE_REPO = persistence_repositories.AsyncDiskCalorieRepository()
 
 
 def _get_user_id(ctx: Context | None) -> str:
-    """
-    Return the authenticated user identifier for this request.
-
-    For Streamable HTTP, the MCP bearer auth backend attaches an AuthenticatedUser
-    to the underlying Starlette request (request.user.access_token.client_id).
-    FastMCP's Context.client_id reads from request meta and may be unset, so we
-    prefer the Starlette auth user when available.
-    """
     if ctx is None:
-        return "anonymous"
+        raise ValueError("Context is required")
 
-    # Prefer Starlette AuthenticationMiddleware user if present
+    req = ctx.request_context.request
+    if req is None:
+        raise ValueError("Missing request on MCP context")
+
     try:
-        req = ctx.request_context.request
-        user = getattr(req, "user", None) if req is not None else None
-        access_token = getattr(user, "access_token", None) if user is not None else None
-        principal = getattr(access_token, "client_id", None) if access_token is not None else None
-        if isinstance(principal, str) and principal.strip():
-            return principal.strip()
-    except Exception:
-        pass
+        user_id = req.user.access_token.client_id
+    except AttributeError as e:
+        raise ValueError("Missing authenticated user id on MCP context") from e
 
-    # Fallback: FastMCP-provided client_id (may be None depending on transport)
-    cid = getattr(ctx, "client_id", None)
-    if isinstance(cid, str) and cid.strip():
-        return cid.strip()
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise ValueError("Invalid authenticated user id on MCP context")
 
-    return "anonymous"
+    return user_id.strip()
 
 
 def _format_local_date_yyyy_mm_dd(dt: datetime) -> str:
@@ -235,7 +223,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def log_food(
+async def log_food(
     food: str,
     calories: int | str,
     date: str | None = None,
@@ -263,7 +251,7 @@ def log_food(
         if len(notes) > 500:
             return _reply("Invalid input: `notes` must be <= 500 characters.")
 
-    entry = CALORIE_REPO.add_entry(
+    entry = await CALORIE_REPO.add_entry(
         user_id,
         food=food.strip(),
         calories=int(parsed_calories),
@@ -272,8 +260,10 @@ def log_food(
         notes=notes,
         created_at=now.isoformat(),
     )
-    day_entries = CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
-    summary = _summarize_for_entries(day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=CALORIE_REPO.get_daily_goal(user_id))
+    day_entries = await CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
+    summary = _summarize_for_entries(
+        day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=await CALORIE_REPO.get_daily_goal(user_id)
+    )
     return _reply(
         f'Logged {int(entry.calories or 0)} calories for "{entry.food or ""}" on {yyyy_mm_dd}.',
         entries=day_entries,
@@ -282,24 +272,24 @@ def log_food(
 
 
 @mcp.tool()
-def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
+async def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Deletes a logged food entry by id.
     """
     if not isinstance(id, str) or not id.strip():
         return _reply("Missing entry id.")
     user_id = _get_user_id(ctx)
-    all_entries = CALORIE_REPO.list_entries(user_id)
+    all_entries = await CALORIE_REPO.list_entries(user_id)
     entry = next((e for e in all_entries if e.id == id), None)
     if entry is None:
         return _reply(f"Entry {id} was not found.", entries=all_entries)
-    ok = CALORIE_REPO.delete_entry(user_id, id)
-    remaining = CALORIE_REPO.list_entries(user_id)
+    ok = await CALORIE_REPO.delete_entry(user_id, id)
+    remaining = await CALORIE_REPO.list_entries(user_id)
     entry_date = str(entry.date or _format_local_date_yyyy_mm_dd(datetime.now()))
     summary = _summarize_for_entries(
         [e for e in remaining if e.date == entry_date],
         yyyy_mm_dd=entry_date,
-        goal=CALORIE_REPO.get_daily_goal(user_id),
+        goal=await CALORIE_REPO.get_daily_goal(user_id),
     )
     food = entry.food or "unknown"
     msg = f'Deleted entry "{food}" ({id}).' if ok else f'Entry {id} was not found.'
@@ -307,38 +297,48 @@ def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
 
 
 @mcp.tool()
-def list_entries(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
+async def list_entries(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Lists logged food entries (optionally filtered by date).
     """
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=CALORIE_REPO.list_entries(user_id))
+        return _reply(
+            "Invalid input: `date` must be YYYY-MM-DD.",
+            entries=await CALORIE_REPO.list_entries(user_id),
+        )
     user_id = _get_user_id(ctx)
     if not parsed_date:
-        return _reply("All entries:", entries=CALORIE_REPO.list_entries(user_id))
-    filtered = CALORIE_REPO.list_entries(user_id, date=parsed_date)
+        return _reply("All entries:", entries=await CALORIE_REPO.list_entries(user_id))
+    filtered = await CALORIE_REPO.list_entries(user_id, date=parsed_date)
     return _reply(
         f"Entries for {parsed_date}:",
         entries=filtered,
-        summary=_summarize_for_entries(filtered, yyyy_mm_dd=parsed_date, goal=CALORIE_REPO.get_daily_goal(user_id)),
+        summary=_summarize_for_entries(
+            filtered, yyyy_mm_dd=parsed_date, goal=await CALORIE_REPO.get_daily_goal(user_id)
+        ),
     )
 
 
 @mcp.tool()
-def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
+async def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Returns total calories and entry count for a date (defaults to today).
     """
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=CALORIE_REPO.list_entries(user_id))
+        return _reply(
+            "Invalid input: `date` must be YYYY-MM-DD.",
+            entries=await CALORIE_REPO.list_entries(user_id),
+        )
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(datetime.now())
     user_id = _get_user_id(ctx)
-    day_entries = CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
-    summary = _summarize_for_entries(day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=CALORIE_REPO.get_daily_goal(user_id))
+    day_entries = await CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
+    summary = _summarize_for_entries(
+        day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=await CALORIE_REPO.get_daily_goal(user_id)
+    )
     goal_text = (
         f' Goal {summary.get("goalCalories")}, remaining {summary.get("remainingCalories")}.'
         if "goalCalories" in summary
@@ -352,22 +352,22 @@ def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> Ca
 
 
 @mcp.tool()
-def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieToolResponse:
+async def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieToolResponse:
     """
     Sets a daily calorie goal (used by daily summaries).
     """
     goal = _parse_goal_int_pos(calories)
     if goal is None:
         user_id = _get_user_id(ctx)
-        return _reply("Invalid goal calories.", entries=CALORIE_REPO.list_entries(user_id))
+        return _reply("Invalid goal calories.", entries=await CALORIE_REPO.list_entries(user_id))
     user_id = _get_user_id(ctx)
-    CALORIE_REPO.set_daily_goal(user_id, int(goal))
+    await CALORIE_REPO.set_daily_goal(user_id, int(goal))
     today = _format_local_date_yyyy_mm_dd(datetime.now())
-    entries = CALORIE_REPO.list_entries(user_id, date=today)
+    entries = await CALORIE_REPO.list_entries(user_id, date=today)
     return _reply(
         f"Set daily goal to {goal} calories.",
         entries=entries,
-        summary=_summarize_for_entries(entries, yyyy_mm_dd=today, goal=CALORIE_REPO.get_daily_goal(user_id)),
+        summary=_summarize_for_entries(entries, yyyy_mm_dd=today, goal=await CALORIE_REPO.get_daily_goal(user_id)),
     )
 
 
