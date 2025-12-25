@@ -1,21 +1,20 @@
 from __future__ import annotations
-from urllib.parse import urlparse, parse_qs
 
 import base64
 import hashlib
 import logging
 import time
 import uuid
-from typing import Any, Optional
-from urllib.parse import urlencode
 from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from src.settings import get_settings
 from src.persistence.auth_state import DiskAuthStateRepository
+from src.settings import get_settings
 
 router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -493,12 +492,14 @@ async def token(request: Request):
         if client_id != STATIC_CLIENT_ID or client_secret != STATIC_CLIENT_SECRET:
             raise HTTPException(status_code=401, detail="invalid_client")
 
-        scopes = (scope or "toy.read").split()
+        scope_str = scope if isinstance(scope, str) else "toy.read"
+        scopes = scope_str.split()
         for s in scopes:
             if s not in SCOPES_SUPPORTED:
                 raise HTTPException(status_code=400, detail=f"unsupported_scope: {s}")
 
         # client_credentials is client-only (no user)
+        assert isinstance(client_id, str)
         return JSONResponse(_issue_access_token(subject=client_id, scopes=scopes, client_id=client_id))
 
     raise HTTPException(status_code=400, detail="unsupported_grant_type")

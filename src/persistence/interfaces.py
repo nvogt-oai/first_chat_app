@@ -10,8 +10,10 @@ class KeyValueDocumentStore(Protocol):
 
     def load(self) -> dict[str, Any]:
         """Load and return the full document (never None)."""
+        ...
 
     def save(self, doc: dict[str, Any]) -> None:
         """Persist the full document atomically."""
+        ...
 
 

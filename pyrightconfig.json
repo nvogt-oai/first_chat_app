@@ -1,9 +1,16 @@
 {
-  "exclude": ["**/__pycache__"],
+  "include": ["app.py", "src"],
+  "exclude": [
+    "**/__pycache__",
+    "**/.venv",
+    "**/venv",
+    "**/.mypy_cache",
+    "**/.pytest_cache",
+    "data"
+  ],
   "executionEnvironments": [
     {
-      "root": ".",
-      "extraPaths": [".", "./src"]
+      "root": "."
     }
   ]
 }

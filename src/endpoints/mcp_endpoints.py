@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import jwt
 from pydantic import AnyHttpUrl
@@ -40,12 +40,12 @@ class ToolTextContent(TypedDict):
     text: str
 
 
-class DailySummary(TypedDict, total=False):
+class DailySummary(TypedDict):
     date: str
     totalCalories: int
     entriesCount: int
-    goalCalories: int
-    remainingCalories: int
+    goalCalories: NotRequired[int]
+    remainingCalories: NotRequired[int]
 
 
 class CalorieEntry(TypedDict, total=False):
