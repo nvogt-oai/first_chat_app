@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.json_store import atomic_write_json, read_json
+from json_store import atomic_write_json, read_json
 
 from .interfaces import KeyValueDocumentStore
 from .locks import GLOBAL_PATH_LOCKS

@@ -18,9 +18,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
-from src.endpoints.auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
-from src.settings import get_settings
-from src.persistence.calorie_state import DiskCalorieStateRepository
+from endpoints.auth_endpoints import ISSUER, JWT_ALG, JWT_SECRET
+from persistence.calorie_state import DiskCalorieStateRepository
+from settings import get_settings
 
 REQUIRED_SCOPES = ["toy.read"]
 SETTINGS = get_settings()
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 ISSUER_URL = AnyHttpUrl(ISSUER)
 RESOURCE_SERVER_URL = AnyHttpUrl(SETTINGS.resource_server_url)
 
-YYYY_MM_DD_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+YYYY_MM_DD_RE = re.compile(r"^\\d{4}-\\d{2}-\\d{2}$")
 Meal = Literal["breakfast", "lunch", "dinner", "snack"]
 
 
@@ -72,7 +72,7 @@ class _State:
 
 STATE_LOCK = threading.Lock()
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CALORIE_REPO = DiskCalorieStateRepository()
 
 
@@ -274,7 +274,6 @@ class JwtTokenVerifier(TokenVerifier):
         )
 
 
-
 mcp = FastMCP(
     "Toy MCP (OAuth + JWT)",
     stateless_http=True,
@@ -449,3 +448,5 @@ def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieTo
         entries=list(state.entries),
         summary=_summarize_for_date(state, today),
     )
+
+

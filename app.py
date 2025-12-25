@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    from src.endpoints.mcp_endpoints import mcp
+    from endpoints.mcp_endpoints import mcp
 
     async with mcp.session_manager.run():
         yield
@@ -22,8 +22,8 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     load_dotenv("local.env")
 
-    from src.endpoints.auth_endpoints import ISSUER, router as auth_router
-    from src.endpoints.mcp_endpoints import mcp
+    from endpoints.auth_endpoints import ISSUER, router as auth_router
+    from endpoints.mcp_endpoints import mcp
 
     mcp.settings.streamable_http_path = "/"
 

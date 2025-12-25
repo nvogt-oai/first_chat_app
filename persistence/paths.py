@@ -4,8 +4,8 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    # src/persistence/paths.py -> src/persistence -> src -> project root
-    return Path(__file__).resolve().parents[2]
+    # persistence/paths.py -> persistence -> project root
+    return Path(__file__).resolve().parents[1]
 
 
 def data_dir() -> Path:

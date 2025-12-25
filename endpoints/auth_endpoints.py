@@ -13,8 +13,8 @@ import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from src.persistence.auth_state import DiskAuthStateRepository
-from src.settings import get_settings
+from persistence.auth_state import DiskAuthStateRepository
+from settings import get_settings
 
 router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AUTH_REPO = DiskAuthStateRepository()
 
 STATIC_CLIENT_ID = SETTINGS.static_client_id
@@ -148,6 +148,7 @@ async def logout(request: Request) -> RedirectResponse:
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return resp
 
+
 def _base_url_from_request(request: Request) -> str:
     # Use public URL when present; otherwise whatever host the request used.
     if PUBLIC_BASE_URL:
@@ -164,7 +165,7 @@ def _issue_access_token(*, subject: str, scopes: list[str], client_id: str | Non
     exp = now + 60 * 60  # 1 hour
 
     payload = {
-        "iss": ISSUER,   # ✅ stable issuer
+        "iss": ISSUER,  # ✅ stable issuer
         "sub": subject,
         "iat": now,
         "exp": exp,
@@ -400,9 +401,7 @@ async def token(request: Request):
     for k in ("code", "code_verifier", "client_secret", "refresh_token"):
         if k in data:
             if DEBUG_LOG_REQUESTS:
-                logger.info(
-                    "TOKEN %s: present=%s len=%s", k, _dbg_present(data.get(k)), _dbg_len(data.get(k))
-                )
+                logger.info("TOKEN %s: present=%s len=%s", k, _dbg_present(data.get(k)), _dbg_len(data.get(k)))
 
     grant_type = data.get("grant_type")
 
@@ -452,7 +451,6 @@ async def token(request: Request):
         if record["client_id"] != client_id or record["redirect_uri"] != redirect_uri:
             raise HTTPException(status_code=400, detail="code_mismatch")
 
-        # ✅ resource echo (ChatGPT may send it; spec expects it to be echoed) :contentReference[oaicite:3]{index=3}
         expected_resource = record.get("resource")
         if expected_resource and resource and resource != expected_resource:
             raise HTTPException(status_code=400, detail="resource_mismatch")
@@ -475,12 +473,10 @@ async def token(request: Request):
         # one-time use
         AUTH_REPO.pop_auth_code(str(code))
 
-        # Include resource as audience if present (nice-to-have)
         username = record.get("username")
         if not isinstance(username, str) or not username.strip():
             raise HTTPException(status_code=400, detail="invalid_code_user")
         token_payload = _issue_access_token(subject=username.strip(), scopes=record["scopes"], client_id=client_id)
-        # If you want aud, change _issue_access_token to accept aud/resource and include it.
 
         return JSONResponse(token_payload)
 
@@ -503,3 +499,5 @@ async def token(request: Request):
         return JSONResponse(_issue_access_token(subject=client_id, scopes=scopes, client_id=client_id))
 
     raise HTTPException(status_code=400, detail="unsupported_grant_type")
+
+
