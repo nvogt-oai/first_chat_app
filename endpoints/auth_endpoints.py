@@ -34,12 +34,10 @@ DEBUG_LOG_REQUESTS = SETTINGS.debug_log_requests
 
 PUBLIC_BASE_URL = SETTINGS.public_base_url
 
-DEFAULT_LOCAL_BASE_URL = SETTINGS.local_base_url
 ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AUTH_REPO = DiskAuthStateRepository()
 
 STATIC_CLIENT_ID = SETTINGS.static_client_id

@@ -31,9 +31,6 @@ class Settings:
     static_client_id: str
     static_client_secret: str
 
-    # Persistence (serverless-friendly default: off)
-    persist_to_disk: bool
-
 
 def get_settings() -> Settings:
     public_base_url = (os.getenv("PUBLIC_BASE_URL", "")).rstrip("/")
@@ -52,9 +49,6 @@ def get_settings() -> Settings:
     static_client_id = os.getenv("STATIC_CLIENT_ID", "toy-client")
     static_client_secret = os.getenv("STATIC_CLIENT_SECRET", "toy-secret")
 
-    # Serverless filesystems are ephemeral; default off unless explicitly enabled.
-    persist_to_disk = _env_bool("PERSIST_TO_DISK", False)
-
     return Settings(
         public_base_url=public_base_url,
         local_base_url=local_base_url,
@@ -66,7 +60,6 @@ def get_settings() -> Settings:
         debug_log_requests=debug_log_requests,
         static_client_id=static_client_id,
         static_client_secret=static_client_secret,
-        persist_to_disk=persist_to_disk,
     )
 
 

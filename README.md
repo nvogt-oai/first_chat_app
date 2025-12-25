@@ -39,14 +39,12 @@ If `NGROK_AUTHTOKEN` is set (and `npx` is available), `make run` will start an n
 - **`DEBUG_LOG_TOKENS`**: `1` to log masked token details
 - **`DEBUG_LOG_REQUESTS`**: `1` to log token request envelopes (no secrets)
 - **`RESOURCE_SERVER_URL`**: overrides the OAuth resource server URL (defaults to `${ISSUER}/mcp`)
-- **`PERSIST_TO_DISK`**: `1` to persist `AUTH_STATE.json` / `DATA.json` (defaults **off**, recommended off on Vercel)
 
 ### Vercel notes
 
 - This repo includes **`api/index.py`** and **`vercel.json`** so Vercel can import the ASGI app.
 - **Do not rely on `AUTH_STATE.json` / `DATA.json` on Vercel**. Serverless filesystems are ephemeral.
   - For persistence, use Vercel KV/Redis, Postgres, or Blob storage instead.
-  - If you still enable `PERSIST_TO_DISK=1`, expect data loss across deploys/instances.
 - In Vercel project settings, set **`PUBLIC_BASE_URL`** to your deployed domain (no trailing slash) and set a strong **`JWT_SECRET`**.
 
 

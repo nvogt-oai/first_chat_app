@@ -4,7 +4,6 @@ import logging
 import re
 from datetime import date as Date
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 import jwt
@@ -51,7 +50,6 @@ class CalorieToolResponse(TypedDict, total=False):
     structuredContent: dict[str, Any]
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CALORIE_REPO = DiskCalorieStateRepository()
 
 
