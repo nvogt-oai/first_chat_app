@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
 
 from .disk_store import DiskJsonDocumentStore
+from .paths import calories_users_dir, data_dir, project_root
 
 
 class CalorieDataDoc(BaseModel):
@@ -42,37 +42,38 @@ class CalorieStateRepository:
 
 
 class DiskCalorieStateRepository(CalorieStateRepository):
-    def __init__(self, *, path: Path):
-        self._lock = threading.Lock()
-        self._store = DiskJsonDocumentStore(path)
-        self._doc = self._load()
+    def __init__(self):
+        self._users_dir = calories_users_dir(data_dir())
 
-    def _load(self) -> CalorieDataDoc:
-        raw = self._store.load()
-        doc = CalorieDataDoc.from_disk_doc(raw)
-        # Persist any legacy migration immediately.
-        self._store.save(doc.to_disk_doc())
-        return doc
-
-    def _persist(self) -> None:
-        self._store.save(self._doc.to_disk_doc())
+        # One-time migration from legacy DATA.json if present.
+        legacy = project_root() / "DATA.json"
+        if legacy.exists() and not any(self._users_dir.glob("*.json")):
+            raw = DiskJsonDocumentStore(legacy).load()
+            if isinstance(raw, dict):
+                doc = CalorieDataDoc.from_disk_doc(raw)
+                for uid, state in doc.users.items():
+                    if isinstance(uid, str) and isinstance(state, dict):
+                        DiskJsonDocumentStore(self._user_path(uid)).save(state)
 
     def get_user_state(self, user_id: str) -> dict[str, Any]:
-        uid = user_id.strip() or "anonymous"
-        with self._lock:
-            st = self._doc.users.get(uid)
-            if not isinstance(st, dict):
-                st = {"entries": [], "next_id": 1, "daily_goal_calories": None}
-                self._doc.users[uid] = st
-                self._persist()
-            return dict(st)
+        uid = (user_id.strip() or "anonymous").replace("/", "_")
+        store = DiskJsonDocumentStore(self._user_path(uid))
+        st = store.load()
+        if not isinstance(st, dict) or "entries" not in st:
+            st = {"entries": [], "next_id": 1, "daily_goal_calories": None}
+            store.save(st)
+        return dict(st)
 
     def save_user_state(self, user_id: str, state: dict[str, Any]) -> None:
-        uid = user_id.strip() or "anonymous"
+        uid = (user_id.strip() or "anonymous").replace("/", "_")
         if not isinstance(state, dict):
             raise TypeError("state must be a dict")
-        with self._lock:
-            self._doc.users[uid] = state
-            self._persist()
+        # minimal shape validation
+        if "entries" not in state:
+            raise ValueError("state must include 'entries'")
+        DiskJsonDocumentStore(self._user_path(uid)).save(state)
+
+    def _user_path(self, user_id: str) -> Path:
+        return self._users_dir / f"{user_id}.json"
 
 

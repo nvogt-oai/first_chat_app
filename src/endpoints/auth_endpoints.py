@@ -36,7 +36,7 @@ ISSUER = SETTINGS.issuer
 SCOPES_SUPPORTED = ["toy.read"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-AUTH_REPO = DiskAuthStateRepository(path=PROJECT_ROOT / "AUTH_STATE.json")
+AUTH_REPO = DiskAuthStateRepository()
 
 STATIC_CLIENT_ID = SETTINGS.static_client_id
 STATIC_CLIENT_SECRET = SETTINGS.static_client_secret

@@ -6,6 +6,7 @@ from typing import Any
 from src.json_store import atomic_write_json, read_json
 
 from .interfaces import KeyValueDocumentStore
+from .locks import GLOBAL_PATH_LOCKS
 
 
 class DiskJsonDocumentStore(KeyValueDocumentStore):
@@ -24,10 +25,14 @@ class DiskJsonDocumentStore(KeyValueDocumentStore):
         return self._path
 
     def load(self) -> dict[str, Any]:
-        raw = read_json(self._path)
-        return raw if isinstance(raw, dict) else {}
+        lock = GLOBAL_PATH_LOCKS.lock_for(self._path)
+        with lock:
+            raw = read_json(self._path)
+            return raw if isinstance(raw, dict) else {}
 
     def save(self, doc: dict[str, Any]) -> None:
-        atomic_write_json(self._path, doc)
+        lock = GLOBAL_PATH_LOCKS.lock_for(self._path)
+        with lock:
+            atomic_write_json(self._path, doc)
 
 

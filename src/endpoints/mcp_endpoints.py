@@ -73,7 +73,7 @@ class _State:
 STATE_LOCK = threading.Lock()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CALORIE_REPO = DiskCalorieStateRepository(path=PROJECT_ROOT / "DATA.json")
+CALORIE_REPO = DiskCalorieStateRepository()
 
 
 def _empty_state() -> _State:

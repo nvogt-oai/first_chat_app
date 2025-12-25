@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import threading
 import time
-from pathlib import Path
 from typing import Any, Mapping
 
 from pydantic import BaseModel, Field
 
 from .disk_store import DiskJsonDocumentStore
+from .paths import auth_dir, data_dir, project_root
 
 
 class AuthCodeRecord(BaseModel):
@@ -88,66 +87,110 @@ class AuthStateRepository:
 
 
 class DiskAuthStateRepository(AuthStateRepository):
-    def __init__(self, *, path: Path):
-        self._lock = threading.Lock()
-        self._store = DiskJsonDocumentStore(path)
-        self._state = self._load()
+    """
+    Stores auth state split across multiple files to reduce write amplification / contention:
 
-    def _load(self) -> AuthState:
-        doc = self._store.load()
-        st = AuthState.from_disk_doc(doc)
-        st.drop_expired_auth_codes()
-        self._store.save(st.to_disk_doc())
-        return st
+    - data/auth/registered_clients.json
+    - data/auth/auth_codes.json
+    - data/auth/sessions.json
+    """
 
-    def _persist(self) -> None:
-        self._store.save(self._state.to_disk_doc())
+    def __init__(self):
+        base = auth_dir(data_dir())
+        self._clients = DiskJsonDocumentStore(base / "registered_clients.json")
+        self._codes = DiskJsonDocumentStore(base / "auth_codes.json")
+        self._sessions = DiskJsonDocumentStore(base / "sessions.json")
+
+        # One-time migration from legacy AUTH_STATE.json if present.
+        legacy = project_root() / "AUTH_STATE.json"
+        if legacy.exists() and not (base / "registered_clients.json").exists():
+            raw = DiskJsonDocumentStore(legacy).load()
+            if isinstance(raw, dict):
+                rc = raw.get("registered_clients")
+                ac = raw.get("auth_codes")
+                ss = raw.get("sessions")
+                self._clients.save(rc if isinstance(rc, dict) else {})
+                self._codes.save(ac if isinstance(ac, dict) else {})
+                self._sessions.save(ss if isinstance(ss, dict) else {})
+
+        # Drop expired codes on startup.
+        self._drop_expired_codes()
+
+    def _drop_expired_codes(self) -> None:
+        data = self._codes.load()
+        if not isinstance(data, dict):
+            self._codes.save({})
+            return
+        now = int(time.time())
+        cleaned: dict[str, Any] = {}
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                continue
+            exp = v.get("expires_at")
+            if isinstance(exp, int) and now > exp:
+                continue
+            cleaned[str(k)] = v
+        self._codes.save(cleaned)
 
     def get_registered_client(self, client_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            rec = self._state.registered_clients.get(client_id)
-            return rec.model_dump(mode="json") if rec is not None else None
+        data = self._clients.load()
+        rec = data.get(client_id) if isinstance(data, dict) else None
+        return rec if isinstance(rec, dict) else None
 
     def put_registered_client(self, client_id: str, record: dict[str, Any]) -> None:
-        with self._lock:
-            self._state.registered_clients[client_id] = RegisteredClientRecord.model_validate(record)
-            self._persist()
+        validated = RegisteredClientRecord.model_validate(record).model_dump(mode="json")
+        data = self._clients.load()
+        if not isinstance(data, dict):
+            data = {}
+        data[client_id] = validated
+        self._clients.save(data)
 
     def get_auth_code(self, code: str) -> dict[str, Any] | None:
-        with self._lock:
-            rec = self._state.auth_codes.get(code)
-            if rec is None:
-                return None
-            if int(time.time()) > int(rec.expires_at):
-                self._state.auth_codes.pop(code, None)
-                self._persist()
-                return None
-            return rec.model_dump(mode="json")
+        data = self._codes.load()
+        rec = data.get(code) if isinstance(data, dict) else None
+        if not isinstance(rec, dict):
+            return None
+        exp = rec.get("expires_at")
+        if isinstance(exp, int) and int(time.time()) > exp:
+            # expire eagerly
+            self.pop_auth_code(code)
+            return None
+        return rec
 
     def put_auth_code(self, code: str, record: dict[str, Any]) -> None:
-        with self._lock:
-            self._state.auth_codes[code] = AuthCodeRecord.model_validate(record)
-            self._persist()
+        validated = AuthCodeRecord.model_validate(record).model_dump(mode="json")
+        data = self._codes.load()
+        if not isinstance(data, dict):
+            data = {}
+        data[code] = validated
+        self._codes.save(data)
 
     def pop_auth_code(self, code: str) -> dict[str, Any] | None:
-        with self._lock:
-            rec = self._state.auth_codes.pop(code, None)
-            self._persist()
-            return rec.model_dump(mode="json") if rec is not None else None
+        data = self._codes.load()
+        if not isinstance(data, dict):
+            return None
+        rec = data.pop(code, None)
+        self._codes.save(data)
+        return rec if isinstance(rec, dict) else None
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            rec = self._state.sessions.get(session_id)
-            return rec.model_dump(mode="json") if rec is not None else None
+        data = self._sessions.load()
+        rec = data.get(session_id) if isinstance(data, dict) else None
+        return rec if isinstance(rec, dict) else None
 
     def put_session(self, session_id: str, record: dict[str, Any]) -> None:
-        with self._lock:
-            self._state.sessions[session_id] = SessionRecord.model_validate(record)
-            self._persist()
+        validated = SessionRecord.model_validate(record).model_dump(mode="json")
+        data = self._sessions.load()
+        if not isinstance(data, dict):
+            data = {}
+        data[session_id] = validated
+        self._sessions.save(data)
 
     def delete_session(self, session_id: str) -> None:
-        with self._lock:
-            self._state.sessions.pop(session_id, None)
-            self._persist()
+        data = self._sessions.load()
+        if not isinstance(data, dict):
+            return
+        data.pop(session_id, None)
+        self._sessions.save(data)
 
 
