@@ -13,7 +13,12 @@ import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from persistence.auth_state import DiskAuthStateRepository
+from persistence.auth_state import (
+    AuthCodeRecord,
+    DiskAuthStateRepository,
+    RegisteredClientRecord,
+    SessionRecord,
+)
 from settings import get_settings
 
 router = APIRouter(tags=["auth"])
@@ -64,8 +69,8 @@ def _get_username_from_session(request: Request) -> str | None:
     rec = AUTH_REPO.get_session(sid)
     if not rec:
         return None
-    username = rec.get("username")
-    if isinstance(username, str) and username.strip():
+    username = rec.username
+    if username.strip():
         return username.strip()
     return None
 
@@ -124,7 +129,7 @@ async def login_submit(
     next_path = _safe_next_path(next)
 
     sid = f"sess_{uuid.uuid4().hex}"
-    AUTH_REPO.put_session(sid, {"username": uname, "created_at": int(time.time())})
+    AUTH_REPO.put_session(sid, SessionRecord(username=uname, created_at=int(time.time())))
 
     resp = RedirectResponse(url=next_path, status_code=302)
     # Toy cookie (in production you’d set Secure=True behind HTTPS, and consider SameSite).
@@ -268,12 +273,12 @@ async def register_client(body: dict[str, Any]):
 
     AUTH_REPO.put_registered_client(
         client_id,
-        {
-            "redirect_uris": redirect_uris,
-            "token_endpoint_auth_method": requested_auth_method,
-            "client_secret": client_secret,
-            "created_at": int(time.time()),
-        },
+        RegisteredClientRecord(
+            redirect_uris=redirect_uris,
+            token_endpoint_auth_method=str(requested_auth_method),
+            client_secret=client_secret,
+            created_at=int(time.time()),
+        ),
     )
 
     resp: dict[str, Any] = {
@@ -317,7 +322,7 @@ async def authorize(
     if not client:
         raise HTTPException(status_code=400, detail="unknown_client")
 
-    if redirect_uri not in client["redirect_uris"]:
+    if redirect_uri not in client.redirect_uris:
         raise HTTPException(status_code=400, detail="invalid_redirect_uri")
 
     scopes = (scope or "toy.read").split()
@@ -333,16 +338,16 @@ async def authorize(
     code = f"code_{uuid.uuid4().hex}"
     AUTH_REPO.put_auth_code(
         code,
-        {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "username": username,
-            "scopes": scopes,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method or ("plain" if code_challenge else None),
-            "expires_at": int(time.time()) + 5 * 60,
-            "resource": resource,
-        },
+        AuthCodeRecord(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            username=username,
+            scopes=scopes,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method or ("plain" if code_challenge else None),
+            expires_at=int(time.time()) + 5 * 60,
+            resource=resource,
+        ),
     )
 
     params = {"code": code}
@@ -438,9 +443,9 @@ async def token(request: Request):
             raise HTTPException(status_code=400, detail="unknown_client")
 
         # Enforce client auth method if applicable
-        auth_method = client.get("token_endpoint_auth_method", "none")
+        auth_method = client.token_endpoint_auth_method or "none"
         if auth_method in ("client_secret_post", "client_secret_basic"):
-            expected = client.get("client_secret")
+            expected = client.client_secret
             if not expected or not client_secret or client_secret != expected:
                 raise HTTPException(status_code=401, detail="invalid_client")
 
@@ -448,20 +453,20 @@ async def token(request: Request):
         if not record:
             raise HTTPException(status_code=400, detail="invalid_code")
 
-        if record["client_id"] != client_id or record["redirect_uri"] != redirect_uri:
+        if record.client_id != client_id or record.redirect_uri != redirect_uri:
             raise HTTPException(status_code=400, detail="code_mismatch")
 
-        expected_resource = record.get("resource")
+        expected_resource = record.resource
         if expected_resource and resource and resource != expected_resource:
             raise HTTPException(status_code=400, detail="resource_mismatch")
 
         # PKCE verification if used
-        cc = record.get("code_challenge")
+        cc = record.code_challenge
         if cc is not None:
             if not code_verifier:
                 raise HTTPException(status_code=400, detail="missing_code_verifier")
 
-            method = record.get("code_challenge_method") or "plain"
+            method = record.code_challenge_method or "plain"
             if method == "plain":
                 derived = code_verifier
             else:  # S256
@@ -473,10 +478,10 @@ async def token(request: Request):
         # one-time use
         AUTH_REPO.pop_auth_code(str(code))
 
-        username = record.get("username")
-        if not isinstance(username, str) or not username.strip():
+        username = record.username
+        if not username.strip():
             raise HTTPException(status_code=400, detail="invalid_code_user")
-        token_payload = _issue_access_token(subject=username.strip(), scopes=record["scopes"], client_id=client_id)
+        token_payload = _issue_access_token(subject=username.strip(), scopes=record.scopes, client_id=client_id)
 
         return JSONResponse(token_payload)
 
