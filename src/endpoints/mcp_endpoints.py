@@ -1,8 +1,6 @@
-# mcp_endpoints.py
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 from dataclasses import dataclass
@@ -20,9 +18,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
-from auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
-from json_store import atomic_write_json, read_json  # type: ignore[import-not-found]
-from settings import get_settings
+from src.endpoints.auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
+from src.json_store import atomic_write_json, read_json
+from src.settings import get_settings
 
 REQUIRED_SCOPES = ["toy.read"]
 SETTINGS = get_settings()
@@ -75,8 +73,8 @@ class _State:
 STATE_BY_USER: dict[str, _State] = {}
 STATE_LOCK = threading.Lock()
 
-# Persist toy data to a JSON file in the project directory.
-DATA_FILE = os.path.join(os.path.dirname(__file__), "DATA.json")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_FILE = str(PROJECT_ROOT / "DATA.json")
 
 
 def _empty_state() -> _State:

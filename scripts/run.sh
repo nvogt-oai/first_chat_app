@@ -8,7 +8,6 @@ if [ ! -d ".venv" ]; then
   exit 1
 fi
 
-# Load local env if present (gitignored). This also exports NGROK_AUTHTOKEN for ngrok.
 if [ -f "local.env" ]; then
   set -a
   source local.env

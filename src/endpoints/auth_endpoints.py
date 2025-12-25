@@ -1,4 +1,3 @@
-# auth_endpoints.py
 from __future__ import annotations
 from urllib.parse import urlparse, parse_qs
 
@@ -16,8 +15,8 @@ import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from json_store import atomic_write_json, read_json  # type: ignore[import-not-found]
-from settings import get_settings
+from src.json_store import atomic_write_json, read_json
+from src.settings import get_settings
 
 router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -25,33 +24,30 @@ logger = logging.getLogger(__name__)
 # Centralized settings
 SETTINGS = get_settings()
 
-# -------------------------------------------------------------------
-# CONFIG (toy)
-# -------------------------------------------------------------------
 JWT_SECRET = SETTINGS.jwt_secret
 JWT_ALG = SETTINGS.jwt_alg
 DEBUG_LOG_TOKENS = SETTINGS.debug_log_tokens
 DEBUG_LOG_REQUESTS = SETTINGS.debug_log_requests
 
-# Set this when using ngrok:
-#   export PUBLIC_BASE_URL="https://harsh-jordy-horribly.ngrok-free.dev"
 PUBLIC_BASE_URL = SETTINGS.public_base_url
 
-# ✅ Exported constant: other files can import this
 DEFAULT_LOCAL_BASE_URL = SETTINGS.local_base_url
 ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
-# -------------------------------------------------------------------
-# Toy "user login" (username only) with in-memory sessions
-# -------------------------------------------------------------------
+REGISTERED_CLIENTS: dict[str, dict[str, Any]] = {}
+AUTH_CODES: dict[str, dict[str, Any]] = {}
+
+STATIC_CLIENT_ID = SETTINGS.static_client_id
+STATIC_CLIENT_SECRET = SETTINGS.static_client_secret
+
 SESSION_COOKIE_NAME = "toy_session"
 SESSIONS: dict[str, dict[str, Any]] = {}  # session_id -> { "username": str, "created_at": int }
 
 AUTH_STATE_LOCK = threading.Lock()
-# Persist toy auth state to a separate JSON file in the project directory.
-AUTH_STATE_FILE = Path(__file__).with_name("AUTH_STATE.json")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+AUTH_STATE_FILE = PROJECT_ROOT / "AUTH_STATE.json"
 
 
 def _persist_auth_state_to_disk() -> None:
@@ -119,7 +115,6 @@ def _load_auth_state_from_disk() -> None:
             logger.warning("AUTH STATE LOAD: failed to load %s: %r", AUTH_STATE_FILE, e)
 
 
-# Initialize auth state on import
 _load_auth_state_from_disk()
 
 
@@ -233,20 +228,6 @@ async def logout(request: Request) -> RedirectResponse:
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return resp
 
-# -------------------------------------------------------------------
-# In-memory stores (toy; resets on restart)
-# -------------------------------------------------------------------
-REGISTERED_CLIENTS: dict[str, dict[str, Any]] = {}
-AUTH_CODES: dict[str, dict[str, Any]] = {}
-
-# Optional manual client (for curl client_credentials)
-STATIC_CLIENT_ID = SETTINGS.static_client_id
-STATIC_CLIENT_SECRET = SETTINGS.static_client_secret
-
-
-# -------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------
 def _base_url_from_request(request: Request) -> str:
     # Use public URL when present; otherwise whatever host the request used.
     if PUBLIC_BASE_URL:
@@ -325,9 +306,6 @@ def _mask_token(token: str, *, head: int = 16, tail: int = 8) -> str:
     return f"{token[:head]}...{token[-tail:]}"
 
 
-# -------------------------------------------------------------------
-# WELL-KNOWN METADATA (ChatGPT probes these at ROOT)
-# -------------------------------------------------------------------
 @router.get("/.well-known/oauth-authorization-server")
 async def oauth_authorization_server_metadata(request: Request):
     base = _base_url_from_request(request)
@@ -352,9 +330,6 @@ async def openid_configuration_alias(request: Request):
     return await oauth_authorization_server_metadata(request)
 
 
-# -------------------------------------------------------------------
-# RFC 7591-ish DYNAMIC CLIENT REGISTRATION
-# -------------------------------------------------------------------
 @router.post("/oauth/register")
 async def register_client(body: dict[str, Any]):
     redirect_uris = body.get("redirect_uris")
@@ -394,9 +369,6 @@ async def register_client(body: dict[str, Any]):
     return JSONResponse(resp)
 
 
-# -------------------------------------------------------------------
-# AUTHORIZATION ENDPOINT (toy: auto-approve)
-# -------------------------------------------------------------------
 @router.get("/oauth/authorize")
 async def authorize(
     request: Request,
@@ -457,10 +429,6 @@ async def authorize(
 
     return RedirectResponse(url=f"{redirect_uri}?{urlencode(params)}", status_code=302)
 
-
-# -------------------------------------------------------------------
-# TOKEN ENDPOINT
-# -------------------------------------------------------------------
 
 @router.post("/oauth/token")
 async def token(request: Request):
