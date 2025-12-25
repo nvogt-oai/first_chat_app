@@ -19,8 +19,8 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 from src.endpoints.auth_endpoints import JWT_ALG, JWT_SECRET, ISSUER
-from src.json_store import atomic_write_json, read_json
 from src.settings import get_settings
+from src.persistence.calorie_state import DiskCalorieStateRepository
 
 REQUIRED_SCOPES = ["toy.read"]
 SETTINGS = get_settings()
@@ -70,11 +70,10 @@ class _State:
     daily_goal_calories: int | None
 
 
-STATE_BY_USER: dict[str, _State] = {}
 STATE_LOCK = threading.Lock()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_FILE = str(PROJECT_ROOT / "DATA.json")
+CALORIE_REPO = DiskCalorieStateRepository(path=PROJECT_ROOT / "DATA.json")
 
 
 def _empty_state() -> _State:
@@ -112,108 +111,34 @@ def _get_user_id(ctx: Context | None) -> str:
     return "anonymous"
 
 
-def _load_state_from_disk() -> None:
-    """
-    Load STATE_BY_USER from DATA.json if it exists and is valid JSON.
-
-    Current schema:
-      {
-        "users": {
-          "<username>": { "entries": [...], "next_id": 1, "daily_goal_calories": 2000 | null }
-        }
-      }
-
-    Legacy schema (pre per-user):
-      { "entries": [...], "next_id": 1, "daily_goal_calories": 2000 | null }
-    will be migrated to:
-      { "users": { "default": <legacy_state> } }
-    """
-    with STATE_LOCK:
-        try:
-            if not SETTINGS.persist_to_disk:
-                return
-            data = read_json(Path(DATA_FILE))
-            if not isinstance(data, dict):
-                return
-
-            users_obj = data.get("users")
-            if isinstance(users_obj, dict):
-                STATE_BY_USER.clear()
-                for user_id, st in users_obj.items():
-                    if not isinstance(user_id, str) or not user_id.strip():
-                        continue
-                    if not isinstance(st, dict):
-                        continue
-                    entries = st.get("entries")
-                    next_id = st.get("next_id")
-                    daily_goal = st.get("daily_goal_calories")
-                    state = _empty_state()
-                    if isinstance(entries, list):
-                        cleaned_entries: list[CalorieEntry] = []
-                        for e in entries:
-                            if isinstance(e, dict):
-                                cleaned_entries.append(cast(CalorieEntry, e))
-                        state.entries = cleaned_entries
-                    if isinstance(next_id, int) and next_id >= 1:
-                        state.next_id = next_id
-                    if daily_goal is None or (isinstance(daily_goal, int) and daily_goal >= 1):
-                        state.daily_goal_calories = daily_goal
-                    STATE_BY_USER[user_id.strip()] = state
-                return
-
-            # Legacy migration
-            entries = data.get("entries")
-            next_id = data.get("next_id")
-            daily_goal = data.get("daily_goal_calories")
-            legacy = _empty_state()
-            if isinstance(entries, list):
-                cleaned_entries_legacy: list[CalorieEntry] = []
-                for e in entries:
-                    if isinstance(e, dict):
-                        cleaned_entries_legacy.append(cast(CalorieEntry, e))
-                legacy.entries = cleaned_entries_legacy
-            if isinstance(next_id, int) and next_id >= 1:
-                legacy.next_id = next_id
-            if daily_goal is None or (isinstance(daily_goal, int) and daily_goal >= 1):
-                legacy.daily_goal_calories = daily_goal
-            STATE_BY_USER.clear()
-            STATE_BY_USER["default"] = legacy
-        except Exception as e:
-            logger.warning("DATA LOAD: failed to load %s: %r", DATA_FILE, e)
+def _load_state_for_user_locked(user_id: str) -> _State:
+    raw = CALORIE_REPO.get_user_state(user_id)
+    state = _empty_state()
+    entries = raw.get("entries")
+    next_id = raw.get("next_id")
+    daily_goal = raw.get("daily_goal_calories")
+    if isinstance(entries, list):
+        cleaned_entries: list[CalorieEntry] = []
+        for e in entries:
+            if isinstance(e, dict):
+                cleaned_entries.append(cast(CalorieEntry, e))
+        state.entries = cleaned_entries
+    if isinstance(next_id, int) and next_id >= 1:
+        state.next_id = next_id
+    if daily_goal is None or (isinstance(daily_goal, int) and daily_goal >= 1):
+        state.daily_goal_calories = daily_goal
+    return state
 
 
-def _persist_state_to_disk() -> None:
-    """
-    Atomically write STATE_BY_USER to DATA.json (toy persistence).
-    """
-    with STATE_LOCK:
-        if not SETTINGS.persist_to_disk:
-            return
-        users_payload: dict[str, Any] = {}
-        for user_id, st in STATE_BY_USER.items():
-            users_payload[user_id] = {
-                "entries": st.entries,
-                "next_id": st.next_id,
-                "daily_goal_calories": st.daily_goal_calories,
-            }
-        payload = {"users": users_payload}
-        try:
-            atomic_write_json(Path(DATA_FILE), payload)
-        except Exception as e:
-            logger.warning("DATA SAVE: failed to write %s: %r", DATA_FILE, e)
-
-
-# Initialize state on import
-_load_state_from_disk()
-
-
-def _get_state_for_user(user_id: str) -> _State:
-    with STATE_LOCK:
-        st = STATE_BY_USER.get(user_id)
-        if st is None:
-            st = _empty_state()
-            STATE_BY_USER[user_id] = st
-        return st
+def _save_state_for_user_locked(user_id: str, state: _State) -> None:
+    CALORIE_REPO.save_user_state(
+        user_id,
+        {
+            "entries": state.entries,
+            "next_id": state.next_id,
+            "daily_goal_calories": state.daily_goal_calories,
+        },
+    )
 
 
 def _format_local_date_yyyy_mm_dd(dt: datetime) -> str:
@@ -388,7 +313,8 @@ def log_food(
     now = datetime.now()
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(now)
     user_id = _get_user_id(ctx)
-    state = _get_state_for_user(user_id)
+    with STATE_LOCK:
+        state = _load_state_for_user_locked(user_id)
 
     if meal is not None and meal not in ("breakfast", "lunch", "dinner", "snack"):
         return _reply("Invalid input: `meal` must be one of breakfast/lunch/dinner/snack.")
@@ -415,7 +341,7 @@ def log_food(
 
     with STATE_LOCK:
         state.entries = [*state.entries, entry]
-    _persist_state_to_disk()
+        _save_state_for_user_locked(user_id, state)
     summary = _summarize_for_date(state, yyyy_mm_dd)
     return _reply(
         f'Logged {entry["calories"]} calories for "{entry["food"]}" on {yyyy_mm_dd}.',
@@ -432,14 +358,14 @@ def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
     if not isinstance(id, str) or not id.strip():
         return _reply("Missing entry id.")
     user_id = _get_user_id(ctx)
-    state = _get_state_for_user(user_id)
     with STATE_LOCK:
+        state = _load_state_for_user_locked(user_id)
         entry = next((e for e in state.entries if e.get("id") == id), None)
     if entry is None:
         return _reply(f"Entry {id} was not found.", entries=list(state.entries))
     with STATE_LOCK:
         state.entries = [e for e in state.entries if e.get("id") != id]
-    _persist_state_to_disk()
+        _save_state_for_user_locked(user_id, state)
     entry_date = str(entry.get("date") or _format_local_date_yyyy_mm_dd(datetime.now()))
     summary = _summarize_for_date(state, entry_date)
     food = entry.get("food") or "unknown"
@@ -454,10 +380,12 @@ def list_entries(date: str | None = None, ctx: Context | None = None) -> Calorie
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        state = _get_state_for_user(user_id)
+        with STATE_LOCK:
+            state = _load_state_for_user_locked(user_id)
         return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
     user_id = _get_user_id(ctx)
-    state = _get_state_for_user(user_id)
+    with STATE_LOCK:
+        state = _load_state_for_user_locked(user_id)
     if not parsed_date:
         return _reply("All entries:", entries=list(state.entries))
     with STATE_LOCK:
@@ -477,11 +405,13 @@ def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> Ca
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        state = _get_state_for_user(user_id)
+        with STATE_LOCK:
+            state = _load_state_for_user_locked(user_id)
         return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(datetime.now())
     user_id = _get_user_id(ctx)
-    state = _get_state_for_user(user_id)
+    with STATE_LOCK:
+        state = _load_state_for_user_locked(user_id)
     summary = _summarize_for_date(state, yyyy_mm_dd)
     goal_text = (
         f' Goal {summary.get("goalCalories")}, remaining {summary.get("remainingCalories")}.'
@@ -505,13 +435,14 @@ def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieTo
     goal = _parse_goal_int_pos(calories)
     if goal is None:
         user_id = _get_user_id(ctx)
-        state = _get_state_for_user(user_id)
+        with STATE_LOCK:
+            state = _load_state_for_user_locked(user_id)
         return _reply("Invalid goal calories.", entries=list(state.entries))
     user_id = _get_user_id(ctx)
-    state = _get_state_for_user(user_id)
     with STATE_LOCK:
+        state = _load_state_for_user_locked(user_id)
         state.daily_goal_calories = int(goal)
-    _persist_state_to_disk()
+        _save_state_for_user_locked(user_id, state)
     today = _format_local_date_yyyy_mm_dd(datetime.now())
     return _reply(
         f"Set daily goal to {goal} calories.",

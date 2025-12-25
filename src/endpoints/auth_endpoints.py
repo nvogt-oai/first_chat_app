@@ -4,7 +4,6 @@ from urllib.parse import urlparse, parse_qs
 import base64
 import hashlib
 import logging
-import threading
 import time
 import uuid
 from typing import Any, Optional
@@ -15,8 +14,8 @@ import jwt
 from fastapi import APIRouter, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from src.json_store import atomic_write_json, read_json
 from src.settings import get_settings
+from src.persistence.auth_state import DiskAuthStateRepository
 
 router = APIRouter(tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -36,86 +35,13 @@ ISSUER = SETTINGS.issuer
 
 SCOPES_SUPPORTED = ["toy.read"]
 
-REGISTERED_CLIENTS: dict[str, dict[str, Any]] = {}
-AUTH_CODES: dict[str, dict[str, Any]] = {}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+AUTH_REPO = DiskAuthStateRepository(path=PROJECT_ROOT / "AUTH_STATE.json")
 
 STATIC_CLIENT_ID = SETTINGS.static_client_id
 STATIC_CLIENT_SECRET = SETTINGS.static_client_secret
 
 SESSION_COOKIE_NAME = "toy_session"
-SESSIONS: dict[str, dict[str, Any]] = {}  # session_id -> { "username": str, "created_at": int }
-
-AUTH_STATE_LOCK = threading.Lock()
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-AUTH_STATE_FILE = PROJECT_ROOT / "AUTH_STATE.json"
-
-
-def _persist_auth_state_to_disk() -> None:
-    """
-    Atomically write auth state to AUTH_STATE.json (toy persistence).
-
-    Schema:
-      {
-        "registered_clients": { ... },
-        "auth_codes": { ... },
-        "sessions": { ... }
-      }
-    """
-    with AUTH_STATE_LOCK:
-        if not SETTINGS.persist_to_disk:
-            return
-        payload = {
-            "registered_clients": REGISTERED_CLIENTS,
-            "auth_codes": AUTH_CODES,
-            "sessions": SESSIONS,
-        }
-        try:
-            atomic_write_json(AUTH_STATE_FILE, payload)
-        except Exception as e:
-            logger.warning("AUTH STATE SAVE: failed to write %s: %r", AUTH_STATE_FILE, e)
-
-
-def _load_auth_state_from_disk() -> None:
-    """
-    Load auth state from AUTH_STATE.json if it exists and is valid JSON.
-    Drops expired auth codes on load.
-    """
-    with AUTH_STATE_LOCK:
-        try:
-            if not SETTINGS.persist_to_disk:
-                return
-            data = read_json(AUTH_STATE_FILE)
-            if not isinstance(data, dict):
-                return
-
-            rc = data.get("registered_clients")
-            ac = data.get("auth_codes")
-            ss = data.get("sessions")
-
-            if isinstance(rc, dict):
-                REGISTERED_CLIENTS.clear()
-                REGISTERED_CLIENTS.update({str(k): v for k, v in rc.items() if isinstance(v, dict)})
-
-            if isinstance(ss, dict):
-                SESSIONS.clear()
-                SESSIONS.update({str(k): v for k, v in ss.items() if isinstance(v, dict)})
-
-            # Auth codes are short-lived; drop expired on load.
-            if isinstance(ac, dict):
-                AUTH_CODES.clear()
-                now = int(time.time())
-                for k, v in ac.items():
-                    if not isinstance(v, dict):
-                        continue
-                    exp = v.get("expires_at")
-                    if isinstance(exp, int) and now > exp:
-                        continue
-                    AUTH_CODES[str(k)] = v
-        except Exception as e:
-            logger.warning("AUTH STATE LOAD: failed to load %s: %r", AUTH_STATE_FILE, e)
-
-
-_load_auth_state_from_disk()
 
 
 def _safe_next_path(next_path: Any) -> str:
@@ -136,8 +62,7 @@ def _get_username_from_session(request: Request) -> str | None:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if not sid:
         return None
-    with AUTH_STATE_LOCK:
-        rec = SESSIONS.get(sid)
+    rec = AUTH_REPO.get_session(sid)
     if not rec:
         return None
     username = rec.get("username")
@@ -200,9 +125,7 @@ async def login_submit(
     next_path = _safe_next_path(next)
 
     sid = f"sess_{uuid.uuid4().hex}"
-    with AUTH_STATE_LOCK:
-        SESSIONS[sid] = {"username": uname, "created_at": int(time.time())}
-    _persist_auth_state_to_disk()
+    AUTH_REPO.put_session(sid, {"username": uname, "created_at": int(time.time())})
 
     resp = RedirectResponse(url=next_path, status_code=302)
     # Toy cookie (in production you’d set Secure=True behind HTTPS, and consider SameSite).
@@ -221,9 +144,7 @@ async def login_submit(
 async def logout(request: Request) -> RedirectResponse:
     sid = request.cookies.get(SESSION_COOKIE_NAME)
     if sid:
-        with AUTH_STATE_LOCK:
-            SESSIONS.pop(sid, None)
-        _persist_auth_state_to_disk()
+        AUTH_REPO.delete_session(sid)
     resp = RedirectResponse(url="/", status_code=302)
     resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
     return resp
@@ -345,14 +266,15 @@ async def register_client(body: dict[str, Any]):
     if requested_auth_method != "none":
         client_secret = f"secret_{uuid.uuid4().hex}"
 
-    with AUTH_STATE_LOCK:
-        REGISTERED_CLIENTS[client_id] = {
+    AUTH_REPO.put_registered_client(
+        client_id,
+        {
             "redirect_uris": redirect_uris,
             "token_endpoint_auth_method": requested_auth_method,
             "client_secret": client_secret,
             "created_at": int(time.time()),
-        }
-    _persist_auth_state_to_disk()
+        },
+    )
 
     resp: dict[str, Any] = {
         "client_id": client_id,
@@ -391,8 +313,7 @@ async def authorize(
     if response_type != "code":
         raise HTTPException(status_code=400, detail="unsupported_response_type")
 
-    with AUTH_STATE_LOCK:
-        client = REGISTERED_CLIENTS.get(client_id)
+    client = AUTH_REPO.get_registered_client(client_id)
     if not client:
         raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -410,8 +331,9 @@ async def authorize(
             raise HTTPException(status_code=400, detail="unsupported_code_challenge_method")
 
     code = f"code_{uuid.uuid4().hex}"
-    with AUTH_STATE_LOCK:
-        AUTH_CODES[code] = {
+    AUTH_REPO.put_auth_code(
+        code,
+        {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "username": username,
@@ -420,8 +342,8 @@ async def authorize(
             "code_challenge_method": code_challenge_method or ("plain" if code_challenge else None),
             "expires_at": int(time.time()) + 5 * 60,
             "resource": resource,
-        }
-    _persist_auth_state_to_disk()
+        },
+    )
 
     params = {"code": code}
     if state:
@@ -513,8 +435,7 @@ async def token(request: Request):
         if not code or not redirect_uri or not client_id:
             raise HTTPException(status_code=400, detail="missing code/redirect_uri/client_id")
 
-        with AUTH_STATE_LOCK:
-            client = REGISTERED_CLIENTS.get(client_id)
+        client = AUTH_REPO.get_registered_client(str(client_id))
         if not client:
             raise HTTPException(status_code=400, detail="unknown_client")
 
@@ -525,16 +446,9 @@ async def token(request: Request):
             if not expected or not client_secret or client_secret != expected:
                 raise HTTPException(status_code=401, detail="invalid_client")
 
-        with AUTH_STATE_LOCK:
-            record = AUTH_CODES.get(code)
+        record = AUTH_REPO.get_auth_code(str(code))
         if not record:
             raise HTTPException(status_code=400, detail="invalid_code")
-
-        if int(time.time()) > int(record["expires_at"]):
-            with AUTH_STATE_LOCK:
-                AUTH_CODES.pop(code, None)
-            _persist_auth_state_to_disk()
-            raise HTTPException(status_code=400, detail="expired_code")
 
         if record["client_id"] != client_id or record["redirect_uri"] != redirect_uri:
             raise HTTPException(status_code=400, detail="code_mismatch")
@@ -560,9 +474,7 @@ async def token(request: Request):
                 raise HTTPException(status_code=400, detail="invalid_code_verifier")
 
         # one-time use
-        with AUTH_STATE_LOCK:
-            AUTH_CODES.pop(code, None)
-        _persist_auth_state_to_disk()
+        AUTH_REPO.pop_auth_code(str(code))
 
         # Include resource as audience if present (nice-to-have)
         username = record.get("username")

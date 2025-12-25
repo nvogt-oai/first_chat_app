@@ -1,70 +1,13 @@
 from __future__ import annotations
 
-import json
+import threading
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
-import threading
-import time
-
 from pydantic import BaseModel, Field
 
-
-def read_json(path: Path) -> Any | None:
-    """
-    Read JSON from disk.
-
-    Returns None for missing files, empty files, or invalid JSON.
-    """
-    try:
-        if not path.exists():
-            return None
-        raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return None
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-def atomic_write_json(path: Path, payload: Any, *, indent: int = 2, sort_keys: bool = True) -> None:
-    """
-    Atomically write JSON to disk by writing to a temp file then replacing.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=indent, sort_keys=sort_keys)
-        f.write("\n")
-    tmp_path.replace(path)
-
-
-# ----------------------------
-# Typed persistence (disk-backed)
-# ----------------------------
-
-
-class DiskJsonDocumentStore:
-    """
-    Stores a single JSON document on disk at a fixed path.
-
-    - Always returns a dict (empty dict on missing/invalid JSON).
-    - Writes atomically.
-    """
-
-    def __init__(self, path: Path):
-        self._path = path
-
-    @property
-    def path(self) -> Path:
-        return self._path
-
-    def load(self) -> dict[str, Any]:
-        raw = read_json(self._path)
-        return raw if isinstance(raw, dict) else {}
-
-    def save(self, doc: dict[str, Any]) -> None:
-        atomic_write_json(self._path, doc)
+from .disk_store import DiskJsonDocumentStore
 
 
 class AuthCodeRecord(BaseModel):
@@ -92,7 +35,7 @@ class SessionRecord(BaseModel):
 
 class AuthState(BaseModel):
     """
-    Mirrors AUTH_STATE.json on disk:
+    Mirrors the on-disk AUTH_STATE.json schema exactly:
       {
         "registered_clients": { "<client_id>": {...} },
         "auth_codes": { "<code>": {...} },
@@ -118,11 +61,33 @@ class AuthState(BaseModel):
             self.auth_codes.pop(k, None)
 
 
-class DiskAuthStateRepository:
-    """
-    DB-friendly-ish boundary: a single auth state document, persisted on each mutation.
-    """
+class AuthStateRepository:
+    def get_registered_client(self, client_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
 
+    def put_registered_client(self, client_id: str, record: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def get_auth_code(self, code: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def put_auth_code(self, code: str, record: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def pop_auth_code(self, code: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def put_session(self, session_id: str, record: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def delete_session(self, session_id: str) -> None:
+        raise NotImplementedError
+
+
+class DiskAuthStateRepository(AuthStateRepository):
     def __init__(self, *, path: Path):
         self._lock = threading.Lock()
         self._store = DiskJsonDocumentStore(path)
@@ -183,67 +148,6 @@ class DiskAuthStateRepository:
     def delete_session(self, session_id: str) -> None:
         with self._lock:
             self._state.sessions.pop(session_id, None)
-            self._persist()
-
-
-Meal = str  # kept loose here; validation happens at endpoint layer
-
-
-class CalorieDataDoc(BaseModel):
-    users: dict[str, dict[str, Any]] = Field(default_factory=dict)
-
-    @classmethod
-    def from_disk_doc(cls, doc: Mapping[str, Any]) -> "CalorieDataDoc":
-        # Legacy migration: { "entries": [...], "next_id": 1, "daily_goal_calories": ... }
-        if "users" not in doc and any(k in doc for k in ("entries", "next_id", "daily_goal_calories")):
-            legacy_user = {
-                "entries": doc.get("entries", []),
-                "next_id": doc.get("next_id", 1),
-                "daily_goal_calories": doc.get("daily_goal_calories", None),
-            }
-            return cls.model_validate({"users": {"default": legacy_user}})
-        return cls.model_validate(doc)
-
-    def to_disk_doc(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
-
-
-class DiskCalorieStateRepository:
-    """
-    Stores the DATA.json document with per-user states in a DB-friendly boundary.
-    """
-
-    def __init__(self, *, path: Path):
-        self._lock = threading.Lock()
-        self._store = DiskJsonDocumentStore(path)
-        self._doc = self._load()
-
-    def _load(self) -> CalorieDataDoc:
-        raw = self._store.load()
-        doc = CalorieDataDoc.from_disk_doc(raw)
-        self._store.save(doc.to_disk_doc())
-        return doc
-
-    def _persist(self) -> None:
-        self._store.save(self._doc.to_disk_doc())
-
-    def get_user_state(self, user_id: str) -> dict[str, Any]:
-        uid = user_id.strip() or "anonymous"
-        with self._lock:
-            st = self._doc.users.get(uid)
-            if not isinstance(st, dict):
-                st = {"entries": [], "next_id": 1, "daily_goal_calories": None}
-                self._doc.users[uid] = st
-                self._persist()
-            return dict(st)
-
-    def save_user_state(self, user_id: str, state: dict[str, Any]) -> None:
-        uid = user_id.strip() or "anonymous"
-        # Validate we can roundtrip as JSON-ish.
-        if not isinstance(state, dict):
-            raise TypeError("state must be a dict")
-        with self._lock:
-            self._doc.users[uid] = state
             self._persist()
 
 

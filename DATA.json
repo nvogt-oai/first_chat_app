@@ -14,6 +14,7 @@
           "date": "2025-12-24",
           "food": "Choripan sandwich (chorizo) on baguette roll with lettuce, tomato, and mayonnaise",
           "id": "entry-1",
+          "meal": null,
           "notes": "Estimated calories: chorizo + baguette roll + mayo; lettuce/tomato minimal."
         }
       ],
@@ -33,6 +34,7 @@
           "date": "2025-12-24",
           "food": "Chorip\u00e1n sandwich (whole)",
           "id": "entry-1",
+          "meal": null,
           "notes": "Adjusted to double the earlier estimate for a whole sandwich."
         }
       ],
