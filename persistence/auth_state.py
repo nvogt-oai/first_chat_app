@@ -101,18 +101,6 @@ class DiskAuthStateRepository(AuthStateRepository):
         self._codes = DiskJsonDocumentStore(base / "auth_codes.json")
         self._sessions = DiskJsonDocumentStore(base / "sessions.json")
 
-        # One-time migration from legacy AUTH_STATE.json if present.
-        legacy = project_root() / "AUTH_STATE.json"
-        if legacy.exists() and not (base / "registered_clients.json").exists():
-            raw = DiskJsonDocumentStore(legacy).load()
-            if isinstance(raw, dict):
-                rc = raw.get("registered_clients")
-                ac = raw.get("auth_codes")
-                ss = raw.get("sessions")
-                self._clients.save(rc if isinstance(rc, dict) else {})
-                self._codes.save(ac if isinstance(ac, dict) else {})
-                self._sessions.save(ss if isinstance(ss, dict) else {})
-
         # Drop expired codes on startup.
         self._drop_expired_codes()
 

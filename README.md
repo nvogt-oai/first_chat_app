@@ -7,8 +7,8 @@ Toy FastAPI app that exposes an MCP server protected by a minimal OAuth2 (author
 - **`app.py`**: FastAPI entrypoint, CORS, mounts MCP at `/mcp/`
 - **`auth_endpoints.py`**: toy login + OAuth endpoints (`/oauth/*`) and auth metadata (`/.well-known/*`)
 - **`mcp_endpoints.py`**: MCP tools (calorie logging) + JWT bearer verification
-- **`AUTH_STATE.json`**: persisted toy auth state (registered clients, auth codes, sessions)
-- **`DATA.json`**: persisted toy per-user calorie data
+- **`data/auth/*.json`**: persisted toy auth state (registered clients, auth codes, sessions)
+- **`data/calories/users/*.json`**: persisted toy per-user calorie data
 
 ### Run locally
 
@@ -51,7 +51,7 @@ If `NGROK_AUTHTOKEN` is set (and `npx` is available), `make run` will start an n
 ### Vercel notes
 
 - This repo includes **`api/index.py`** and **`vercel.json`** so Vercel can import the ASGI app.
-- **Do not rely on `AUTH_STATE.json` / `DATA.json` on Vercel**. Serverless filesystems are ephemeral.
+- **Do not rely on `./data/*` on Vercel**. Serverless filesystems are ephemeral.
   - For persistence, use Vercel KV/Redis, Postgres, or Blob storage instead.
 - In Vercel project settings, set **`PUBLIC_BASE_URL`** to your deployed domain (no trailing slash) and set a strong **`JWT_SECRET`**.
 
