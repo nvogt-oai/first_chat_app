@@ -16,7 +16,8 @@ from mcp.server.fastmcp.server import Context
 from mcp.server.transport_security import TransportSecuritySettings
 
 from endpoints.auth_endpoints import ISSUER, JWT_ALG, JWT_SECRET
-from persistence.calorie_state import CalorieEntryRecord, DiskCalorieStateRepository, UserCalorieStateRecord
+from persistence.calorie_state import CalorieEntryRecord
+from persistence import repositories as persistence_repositories
 from settings import get_settings
 
 REQUIRED_SCOPES = ["toy.read"]
@@ -50,7 +51,7 @@ class CalorieToolResponse(TypedDict, total=False):
     structuredContent: dict[str, Any]
 
 
-CALORIE_REPO = DiskCalorieStateRepository()
+CALORIE_REPO = persistence_repositories.DiskCalorieRepository()
 
 
 def _get_user_id(ctx: Context | None) -> str:
@@ -82,14 +83,6 @@ def _get_user_id(ctx: Context | None) -> str:
         return cid.strip()
 
     return "anonymous"
-
-
-def _load_state(user_id: str) -> UserCalorieStateRecord:
-    return CALORIE_REPO.get_user_state(user_id)
-
-
-def _save_state(user_id: str, state: UserCalorieStateRecord) -> None:
-    CALORIE_REPO.save_user_state(user_id, state)
 
 
 def _format_local_date_yyyy_mm_dd(dt: datetime) -> str:
@@ -134,16 +127,15 @@ def _parse_goal_int_pos(value: Any) -> int | None:
     return n
 
 
-def _summarize_for_date(state: UserCalorieStateRecord, yyyy_mm_dd: str) -> DailySummary:
-    day_entries = [e for e in state.entries if e.date == yyyy_mm_dd]
+def _summarize_for_entries(entries: list[CalorieEntryRecord], *, yyyy_mm_dd: str, goal: int | None) -> DailySummary:
+    day_entries = [e for e in entries if e.date == yyyy_mm_dd]
     total = sum(int(e.calories or 0) for e in day_entries)
     summary: DailySummary = {
         "date": yyyy_mm_dd,
         "totalCalories": int(total),
         "entriesCount": len(day_entries),
     }
-    if isinstance(state.daily_goal_calories, int):
-        goal = state.daily_goal_calories
+    if isinstance(goal, int):
         summary["goalCalories"] = goal
         summary["remainingCalories"] = max(0, goal - int(total))
     return summary
@@ -264,7 +256,6 @@ def log_food(
     now = datetime.now()
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(now)
     user_id = _get_user_id(ctx)
-    state = _load_state(user_id)
 
     if notes is not None:
         if not isinstance(notes, str) or not notes.strip():
@@ -272,24 +263,20 @@ def log_food(
         if len(notes) > 500:
             return _reply("Invalid input: `notes` must be <= 500 characters.")
 
-    entry_id = f"entry-{state.next_id}"
-    state.next_id += 1
-    entry = CalorieEntryRecord(
-        id=entry_id,
+    entry = CALORIE_REPO.add_entry(
+        user_id,
         food=food.strip(),
         calories=int(parsed_calories),
         date=yyyy_mm_dd,
         meal=meal,
         notes=notes,
-        createdAt=now.isoformat(),
+        created_at=now.isoformat(),
     )
-
-    state.entries = [*state.entries, entry]
-    _save_state(user_id, state)
-    summary = _summarize_for_date(state, yyyy_mm_dd)
+    day_entries = CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
+    summary = _summarize_for_entries(day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=CALORIE_REPO.get_daily_goal(user_id))
     return _reply(
         f'Logged {int(entry.calories or 0)} calories for "{entry.food or ""}" on {yyyy_mm_dd}.',
-        entries=list(state.entries),
+        entries=day_entries,
         summary=summary,
     )
 
@@ -302,16 +289,21 @@ def delete_entry(id: str, ctx: Context | None = None) -> CalorieToolResponse:
     if not isinstance(id, str) or not id.strip():
         return _reply("Missing entry id.")
     user_id = _get_user_id(ctx)
-    state = _load_state(user_id)
-    entry = next((e for e in state.entries if e.id == id), None)
+    all_entries = CALORIE_REPO.list_entries(user_id)
+    entry = next((e for e in all_entries if e.id == id), None)
     if entry is None:
-        return _reply(f"Entry {id} was not found.", entries=list(state.entries))
-    state.entries = [e for e in state.entries if e.id != id]
-    _save_state(user_id, state)
+        return _reply(f"Entry {id} was not found.", entries=all_entries)
+    ok = CALORIE_REPO.delete_entry(user_id, id)
+    remaining = CALORIE_REPO.list_entries(user_id)
     entry_date = str(entry.date or _format_local_date_yyyy_mm_dd(datetime.now()))
-    summary = _summarize_for_date(state, entry_date)
+    summary = _summarize_for_entries(
+        [e for e in remaining if e.date == entry_date],
+        yyyy_mm_dd=entry_date,
+        goal=CALORIE_REPO.get_daily_goal(user_id),
+    )
     food = entry.food or "unknown"
-    return _reply(f'Deleted entry "{food}" ({id}).', entries=list(state.entries), summary=summary)
+    msg = f'Deleted entry "{food}" ({id}).' if ok else f'Entry {id} was not found.'
+    return _reply(msg, entries=remaining, summary=summary)
 
 
 @mcp.tool()
@@ -322,17 +314,15 @@ def list_entries(date: str | None = None, ctx: Context | None = None) -> Calorie
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        state = _load_state(user_id)
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
+        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=CALORIE_REPO.list_entries(user_id))
     user_id = _get_user_id(ctx)
-    state = _load_state(user_id)
     if not parsed_date:
-        return _reply("All entries:", entries=list(state.entries))
-    filtered = [e for e in state.entries if e.date == parsed_date]
+        return _reply("All entries:", entries=CALORIE_REPO.list_entries(user_id))
+    filtered = CALORIE_REPO.list_entries(user_id, date=parsed_date)
     return _reply(
         f"Entries for {parsed_date}:",
         entries=filtered,
-        summary=_summarize_for_date(state, parsed_date),
+        summary=_summarize_for_entries(filtered, yyyy_mm_dd=parsed_date, goal=CALORIE_REPO.get_daily_goal(user_id)),
     )
 
 
@@ -344,18 +334,16 @@ def get_daily_summary(date: str | None = None, ctx: Context | None = None) -> Ca
     parsed_date = _parse_date_yyyy_mm_dd(date)
     if date is not None and parsed_date is None:
         user_id = _get_user_id(ctx)
-        state = _load_state(user_id)
-        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=list(state.entries))
+        return _reply("Invalid input: `date` must be YYYY-MM-DD.", entries=CALORIE_REPO.list_entries(user_id))
     yyyy_mm_dd = parsed_date or _format_local_date_yyyy_mm_dd(datetime.now())
     user_id = _get_user_id(ctx)
-    state = _load_state(user_id)
-    summary = _summarize_for_date(state, yyyy_mm_dd)
+    day_entries = CALORIE_REPO.list_entries(user_id, date=yyyy_mm_dd)
+    summary = _summarize_for_entries(day_entries, yyyy_mm_dd=yyyy_mm_dd, goal=CALORIE_REPO.get_daily_goal(user_id))
     goal_text = (
         f' Goal {summary.get("goalCalories")}, remaining {summary.get("remainingCalories")}.'
         if "goalCalories" in summary
         else ""
     )
-    day_entries = [e for e in state.entries if e.date == yyyy_mm_dd]
     return _reply(
         f'Total for {yyyy_mm_dd}: {summary["totalCalories"]} calories across {summary["entriesCount"]} entries.{goal_text}',
         entries=day_entries,
@@ -371,17 +359,15 @@ def set_daily_goal(calories: int | str, ctx: Context | None = None) -> CalorieTo
     goal = _parse_goal_int_pos(calories)
     if goal is None:
         user_id = _get_user_id(ctx)
-        state = _load_state(user_id)
-        return _reply("Invalid goal calories.", entries=list(state.entries))
+        return _reply("Invalid goal calories.", entries=CALORIE_REPO.list_entries(user_id))
     user_id = _get_user_id(ctx)
-    state = _load_state(user_id)
-    state.daily_goal_calories = int(goal)
-    _save_state(user_id, state)
+    CALORIE_REPO.set_daily_goal(user_id, int(goal))
     today = _format_local_date_yyyy_mm_dd(datetime.now())
+    entries = CALORIE_REPO.list_entries(user_id, date=today)
     return _reply(
         f"Set daily goal to {goal} calories.",
-        entries=list(state.entries),
-        summary=_summarize_for_date(state, today),
+        entries=entries,
+        summary=_summarize_for_entries(entries, yyyy_mm_dd=today, goal=CALORIE_REPO.get_daily_goal(user_id)),
     )
 
 
