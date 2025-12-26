@@ -4,7 +4,7 @@ Toy FastAPI app that exposes an MCP server protected by a minimal OAuth2 (author
 
 ### What’s in here
 
-- **`app.py`**: FastAPI entrypoint, CORS, mounts MCP at `/mcp/`
+- **`app.py`**: FastAPI entrypoint, CORS, mounts MCP at `/mcp` (redirects `/mcp/` -> `/mcp`)
 - **`auth_endpoints.py`**: toy login + OAuth endpoints (`/oauth/*`) and auth metadata (`/.well-known/*`)
 - **`mcp_endpoints.py`**: MCP tools (calorie logging) + JWT bearer verification
 - **`data/auth/*.json`**: persisted toy auth state (registered clients, auth codes, sessions)
@@ -24,6 +24,30 @@ Run:
 make run
 ```
 
+### MCP Inspector (local)
+
+This repo exposes an MCP server over **Streamable HTTP** at:
+
+- **`http://127.0.0.1:8000/mcp`** (no trailing slash)
+
+To run the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) **purely locally** (no ngrok, localhost metadata), use:
+
+Terminal 1:
+
+```bash
+make run-local
+```
+
+Terminal 2:
+
+```bash
+make inspector
+```
+
+In the Inspector UI (default `http://localhost:5173`), connect via **Streamable HTTP** to:
+
+- **`http://127.0.0.1:8000/mcp`**
+
 ### Clear local persisted state
 
 This app persists toy auth + calorie data to JSON files under `./data/`.
@@ -37,6 +61,8 @@ make reset-data
 This repo uses `python-dotenv` to load `local.env` automatically when you import `app.py`.
 
 If `NGROK_AUTHTOKEN` is set (and `npx` is available), `make run` will start an ngrok tunnel automatically via `npx`. This is intended for **local development only** (don’t use ngrok in production).
+
+Note: when using MCP Inspector locally, prefer `make run-local` so `PUBLIC_BASE_URL` / `NGROK_AUTHTOKEN` from `local.env` won’t cause discovery metadata to point at an ngrok URL.
 
 ### Env vars (optional)
 

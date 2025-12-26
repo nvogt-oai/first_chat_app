@@ -49,7 +49,8 @@ def create_app() -> FastAPI:
     async def oauth_protected_resource_metadata():
         return JSONResponse(
             {
-                "resource": f"{ISSUER}/mcp/",
+                # Keep resource URL stable (no trailing slash) to avoid strict URL mismatch in clients.
+                "resource": f"{ISSUER}/mcp",
                 "authorization_servers": [ISSUER],
                 "scopes_supported": ["toy.read"],
                 "bearer_methods_supported": ["header"],

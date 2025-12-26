@@ -59,7 +59,6 @@ class AuthState(BaseModel):
         for k in expired:
             self.auth_codes.pop(k, None)
 
-
 class AuthStateRepository(Protocol):
     def get_registered_client(self, client_id: str) -> RegisteredClientRecord | None:
         ...
@@ -186,5 +185,6 @@ class DiskAuthStateRepository(AuthStateRepository):
             return
         data.pop(session_id, None)
         self._sessions.save(data)
+
 
 

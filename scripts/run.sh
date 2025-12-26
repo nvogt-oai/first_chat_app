@@ -8,7 +8,8 @@ if [ ! -d ".venv" ]; then
   exit 1
 fi
 
-if [ -f "local.env" ]; then
+# Load local env by default, but allow opting out (useful for forcing localhost URLs in tooling).
+if [ "${SKIP_LOCAL_ENV:-0}" != "1" ] && [ -f "local.env" ]; then
   set -a
   source local.env
   set +a
