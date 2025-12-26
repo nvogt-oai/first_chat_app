@@ -208,6 +208,7 @@ class JwtTokenVerifier(TokenVerifier):
 
 mcp = FastMCP(
     "Toy MCP (OAuth + JWT)",
+    instructions="You are a personal calorie tracking assistant. Help the user log and manage their calorie intake.",
     stateless_http=True,
     json_response=True,
     token_verifier=JwtTokenVerifier(),
